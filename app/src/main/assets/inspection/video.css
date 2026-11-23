@@ -1,0 +1,14 @@
+.video-js .browserengine-vjs-pip svg {
+  display: block;
+  fill: currentColor;
+  height: 1.8em;
+  margin: auto;
+  width: 1.8em;
+}
+
+html.browserengine-pip .vjs-control-bar,
+html.browserengine-pip .vjs-big-play-button,
+html.browserengine-pip .vjs-loading-spinner,
+html.browserengine-pip .vjs-modal-dialog {
+  display: none !important;
+}

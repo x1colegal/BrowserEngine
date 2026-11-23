@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Certificate warning</title>
+<style>
+:root { color-scheme: light dark; font: 17px system-ui, sans-serif; }
+main { max-width: 36rem; margin: 12vh auto; padding: 1.5rem; }
+button { padding: .75rem 1rem; font: inherit; margin: .4rem .4rem .4rem 0; }
+</style>
+<main>
+<h1>Your connection is not private</h1>
+<p id="reason">The site presented an untrusted or invalid certificate.</p>
+<p>Someone could intercept information you send to this site.</p>
+<button id="back">Go back</button>
+<button id="continue" hidden>Accept risk and continue</button>
+<p id="result" role="status"></p>
+</main>
+<script>
+const reason = document.querySelector("#reason");
+const proceed = document.querySelector("#continue");
+const locked = new URLSearchParams(location.search).has("hsts");
+try {
+  const error = document.getFailedCertSecurityInfo();
+  const code = error?.errorCodeString || "";
+  if (code.includes("EXPIRED")) reason.textContent = "The site's certificate has expired.";
+  else if (code.includes("NOT_YET_VALID")) reason.textContent = "The site's certificate is not yet valid.";
+  else if (code.includes("BAD_CERT_DOMAIN")) reason.textContent = "The certificate does not match this site.";
+  else if (code.includes("REVOKED")) reason.textContent = "The site's certificate has been revoked.";
+  else if (code.includes("SELF_SIGNED")) reason.textContent = "The site uses a self-signed certificate.";
+  if (code) reason.append(" (" + code + ")");
+  proceed.hidden = locked || !error.errorIsOverridable || error.hasHSTS || error.hasHPKP;
+} catch (_) {}
+document.querySelector("#back").onclick = () => history.back();
+proceed.onclick = async () => {
+  proceed.disabled = true;
+  try {
+    await document.addCertException(true);
+    location.reload();
+  } catch (_) {
+    document.querySelector("#result").textContent = "This certificate exception could not be added.";
+  } finally {
+    proceed.disabled = false;
+  }
+};
+</script>
+</html>
