@@ -2,10 +2,6 @@
 
 BrowserEngine is an Android browser with a Jetpack Compose Material Design interface and a bundled GeckoView engine. It supports Android 6.0 and later.
 
-## Download
-
-Get the universal APK from [BrowserEngine 1.1](https://github.com/x1colegal/BrowserEngine/releases/tag/1.1). It includes ARM and x86 builds for both 32-bit and 64-bit devices. The first release uses the debug-signed APK from the device test build.
-
 ## Features
 
 - Tab overview with animated tab transitions, an address bar with search and a desktop site toggle.
