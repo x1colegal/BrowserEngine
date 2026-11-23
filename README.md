@@ -29,6 +29,8 @@ Use JDK 17 and install Android SDK Platform 36. Set `ANDROID_HOME` or configure 
 
 The APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
 
+See the [changelog](CHANGELOG.md) for the complete 1.1 development history.
+
 ## License
 
 BrowserEngine's original code uses the [MIT License](LICENSE). Third-party components retain their respective licenses.
