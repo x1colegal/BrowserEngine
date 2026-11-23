@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2
+
+- Fix status bar icon contrast in light and dark themes at startup and when switching themes.
+
 ## 1.1
 
 First public release. The internal builds below all contributed to 1.1.

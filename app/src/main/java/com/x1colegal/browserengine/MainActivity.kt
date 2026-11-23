@@ -133,7 +133,10 @@ class MainActivity : ComponentActivity() {
                 this, pipControls, IntentFilter(PIP_CONTROL), ContextCompat.RECEIVER_NOT_EXPORTED
             )
         }
+        applyStatusBarTheme(browser.dark)
         setContent {
+            val dark = browser.dark
+            LaunchedEffect(dark) { applyStatusBarTheme(dark) }
             val tab = browser.current
             LaunchedEffect(pictureInPicture, tab, tab?.webMediaSession, tab?.webPlaying, tab?.webFeatures) {
                 updatePipControls()
@@ -142,6 +145,15 @@ class MainActivity : ComponentActivity() {
                 browser, this, supportsPip, pictureInPicture, ::enterVideoPip,
                 ::setNativePlayer, ::setVideoFullscreen
             )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyStatusBarTheme(dark: Boolean) {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.isAppearanceLightStatusBars = !dark
+        if (Build.VERSION.SDK_INT < 35) {
+            window.statusBarColor = if (dark) android.graphics.Color.BLACK else android.graphics.Color.WHITE
         }
     }
 

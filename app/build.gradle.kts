@@ -11,8 +11,8 @@ android {
         applicationId = "com.x1colegal.browserengine"
         minSdk = 23
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.1"
+        versionCode = 8
+        versionName = "1.2"
     }
     buildFeatures {
         compose = true
