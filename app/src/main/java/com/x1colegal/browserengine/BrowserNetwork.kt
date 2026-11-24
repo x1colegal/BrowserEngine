@@ -1,12 +1,17 @@
 package com.x1colegal.browserengine
 
 import android.net.Uri
+import org.mozilla.geckoview.GeckoSession
 
 internal object BrowserNetwork {
     fun agent(desktop: Boolean): String {
-        val platform = if (desktop) "X11; Linux x86_64" else "Android Cinnamon Bun"
-        return "Mozilla/5.0 ($platform) AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/157.0.0.0 Safari/537.36 EngineBrowser/${BuildConfig.VERSION_NAME}"
+        val mobileAgent = GeckoSession.getDefaultUserAgent()
+        val agent = if (desktop) {
+            "Mozilla/5.0 (X11; Desktop; rv:${mobileAgent.substringAfter("; rv:")}"
+        } else {
+            mobileAgent
+        }
+        return "$agent EngineBrowser/${BuildConfig.VERSION_NAME}"
     }
 
     fun mediaMime(url: String, contentType: String?): String? {

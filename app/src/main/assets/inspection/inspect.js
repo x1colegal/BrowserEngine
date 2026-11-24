@@ -8,6 +8,14 @@ browser.webRequest.onBeforeRequest.addListener(request => {
   }
 }, pageRequests);
 
+browser.webRequest.onBeforeSendHeaders.addListener(request => {
+  const details = connections.get(request.tabId);
+  if (details?.id !== request.requestId || details.url !== request.url) return;
+  details.requestUserAgent = request.requestHeaders?.find(
+    header => header.name.toLowerCase() === "user-agent"
+  )?.value || "";
+}, pageRequests, ["requestHeaders"]);
+
 function recordPeer(details, request) {
   if (!request.fromCache && request.ip) {
     details.ip = request.ip;
@@ -23,18 +31,22 @@ function recordPeer(details, request) {
 }
 
 browser.webRequest.onHeadersReceived.addListener(async request => {
-  const details = connections.get(request.tabId);
-  if (details?.id !== request.requestId || details.url !== request.url) return;
+  if (request.tabId < 0) return;
+  let details = connections.get(request.tabId);
+  if (details?.id !== request.requestId || details.url !== request.url) {
+    details = {id: request.requestId, url: request.url};
+    connections.set(request.tabId, details);
+  }
   recordPeer(details, request);
-  const info = await browser.webRequest.getSecurityInfo(request.requestId).catch(() => null);
-  Object.assign(details, {
+  details.ready = browser.webRequest.getSecurityInfo(request.requestId).catch(() => null).then(info => Object.assign(details, {
     http: request.statusLine?.split(" ")[0] || "",
     cipher: info?.cipherSuite || "",
     keyExchange: info?.keaGroupName || "",
     tls: info?.protocolVersion || "",
     state: info?.state || "",
     fromCache: Boolean(request.fromCache)
-  });
+  }));
+  await details.ready;
 }, pageRequests, ["blocking"]);
 
 browser.webRequest.onResponseStarted.addListener(request => {
@@ -48,9 +60,12 @@ browser.webRequest.onResponseStarted.addListener(request => {
 browser.runtime.onMessage.addListener((message, sender) => {
   if (message !== "connection" || sender.frameId !== 0 || !sender.tab || !sender.url) return;
   const details = connections.get(sender.tab.id);
-  if (!details || new URL(sender.url).href.split("#")[0] !== details.url.split("#")[0]) return;
-  const {id, ...report} = details;
-  return Promise.resolve(report);
+  if (!details || new URL(sender.url).href.split("#")[0] !== new URL(details.url).href.split("#")[0]) return;
+  return Promise.resolve(details.ready).then(() => {
+    if (connections.get(sender.tab.id) !== details) return;
+    const {id, ready, ...report} = details;
+    return report;
+  });
 });
 
 browser.tabs.onRemoved.addListener(tabId => {

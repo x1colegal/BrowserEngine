@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "BrowserEngine Connection Inspector",
-  "version": "1.4",
+  "version": "1.10",
   "browser_specific_settings": {
     "gecko": {
       "id": "connection@browserengine.local"

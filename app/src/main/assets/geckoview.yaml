@@ -1,6 +1,5 @@
 prefs:
-  network.http.http3.enable: false
-  network.http.http3.enable_kyber: false
+  network.http.http3.enable_kyber: true
   security.tls.enable_kyber: true
   dom.security.https_only_mode: false
   dom.security.https_first: false

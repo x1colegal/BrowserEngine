@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3 — Big Update
+
+- Add a native Kotlin home feed with Google search, world and tech news, and Wikipedia sections. Retire the earlier HTML home.
+- Add file downloads and a Downloads screen.
+- Add Server Experiments with periodic and manual checks for feature rollouts.
+- Add first-party and third-party cookie controls, a clear-cookies action, and a setting to disable the website cache. Cookies are allowed and the website cache is disabled by default.
+- Add optional HTTP/3 over QUIC, off by default, and enable X25519MLKEM768 negotiation for compatible HTTP/3 servers. The cipher allowlist applies to TLS over TCP.
+- Use Gecko-based mobile and desktop user agents with a BrowserEngine version suffix. Restore the mobile URL after a desktop redirect and retry connection inspection after a mode change when necessary.
+- Add an experimental certificate viewer for trusted and rejected certificates, including subject alternative names. Add an experimental red certificate warning with a temporary exception action when GeckoView permits it.
+- Remove the floating web PiP overlay and keep PiP actions in the ExoPlayer and compatible Video.js controls.
+
 ## 1.2
 
 - Fix status bar icon contrast in light and dark themes at startup and when switching themes.

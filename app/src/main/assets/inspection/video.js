@@ -4,7 +4,6 @@
   let inPip = false;
   let scheduled = false;
   let controlsVideo = null;
-  let lastIntegrated;
 
   const send = message => {
     try { port?.postMessage(message); } catch (_) {}
@@ -30,7 +29,6 @@
     try {
       const connection = browser.runtime.connectNative("video");
       port = connection;
-      lastIntegrated = undefined;
       connection.onMessage.addListener(message => {
         supported = message.supported;
         if (inPip !== message.inPip) presentPip(message.inPip);
@@ -73,7 +71,6 @@
 
   function refresh() {
     scheduled = false;
-    let integrated = false;
     for (const bar of document.querySelectorAll(".video-js .vjs-control-bar")) {
       const player = bar.closest(".video-js");
       if (!player?.querySelector("video")) continue;
@@ -83,12 +80,6 @@
         bar.insertBefore(button, bar.querySelector(".vjs-fullscreen-control"));
       }
       if (!supported) button?.remove();
-      if (supported && (document.fullscreenElement === player ||
-          document.fullscreenElement?.contains(player))) integrated = true;
-    }
-    if (integrated !== lastIntegrated) {
-      lastIntegrated = integrated;
-      send(integrated ? "integrated" : "fallback");
     }
   }
 
@@ -107,8 +98,5 @@
     presentPip(false);
   });
   document.addEventListener("fullscreenchange", queueRefresh);
-  document.addEventListener("pointerdown", () => {
-    if (document.fullscreenElement) send("touch");
-  }, true);
   new MutationObserver(queueRefresh).observe(document, {childList: true, subtree: true});
 })();
