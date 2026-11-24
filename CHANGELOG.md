@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4
+
+- Split builds into `modern` (Android 8+, auto-tracking the latest GeckoView release) and `legacy` (Android 5.0–7.1, `minSdk 21` with GeckoView `144.0.20251027123126`) from a shared codebase.
+- Add browsing and search history with cached site favicons, individual removal, clear history, and address-bar suggestions while typing.
+- Add experimental **Incognito Mode** (`incognito_mode`) using private GeckoView sessions with an Incognito indicator on the home screen and no saved history.
+- Fix downloads to request `WRITE_EXTERNAL_STORAGE` on Android 5–9 and save files to the public `Downloads` directory (`MediaStore.Downloads` on Android 10+). Add an `X` button to cancel and delete active downloads, plus experimental speed/ETA, rename, and delete actions (`enhanced_downloads`).
+- Add weather on the native home screen (`POST /api/weather` and `POST /api/weather/search`) with condition-styled cards, detailed metrics, city search results, refresh button, and 5-minute server cache.
+- Add thumbnails to world news and featured Wikipedia cards on the native home screen, and switch home feed auth to JSON `POST /api/home` (removing the theme POST).
+- Add experimental `Info` icon replacement for connection details (`connection_info_icon`), keep media/web playback alive when opening non-Settings screens (`Connection Info`, `Downloads`, `History`), and disable web-player PiP while keeping ExoPlayer PiP.
+- Fix TLS 1.2 fallback when all TLS 1.3 cipher suites are disabled, fix TLS/HTTP inspection across redirects and SPA navigations, prevent auto-focusing the address bar on Android 7 startup, and smooth home scrolling.
+
 ## 1.3 — Big Update
 
 - Add a native Kotlin home feed with Google search, world and tech news, and Wikipedia sections. Retire the earlier HTML home.

@@ -35,3 +35,11 @@ internal fun String.toHttpUriOrNull(): Uri? = Uri.parse(this).takeIf { uri ->
     (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) &&
         !uri.host.isNullOrBlank()
 }
+
+internal fun String.sameOriginAs(other: String): Boolean {
+    val a = toHttpUriOrNull() ?: return false
+    val b = other.toHttpUriOrNull() ?: return false
+    return a.scheme.equals(b.scheme, ignoreCase = true) &&
+        a.host.equals(b.host, ignoreCase = true) &&
+        a.port == b.port
+}

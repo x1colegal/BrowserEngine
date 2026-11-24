@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
@@ -50,20 +51,31 @@ import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -109,6 +121,13 @@ import android.net.Uri
 class MainActivity : ComponentActivity() {
     private lateinit var browser: BrowserTabs
     private lateinit var experimentPreferences: SharedPreferences
+    private var pendingDownloadPermissionCallback: ((Boolean) -> Unit)? = null
+    private val storagePermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        pendingDownloadPermissionCallback?.invoke(granted)
+        pendingDownloadPermissionCallback = null
+    }
     private var pendingExperiments by mutableStateOf<Set<String>>(emptySet())
     private var activeExperiments by mutableStateOf<Set<String>>(emptySet())
     private var foregroundExperimentCheck: kotlinx.coroutines.Job? = null
@@ -166,6 +185,10 @@ class MainActivity : ComponentActivity() {
         )
         browser.customCertificateWarning = ServerExperiment.CERTIFICATE_WARNING.key in activeExperiments
         browser.setHomePresentation(homePresentation(activeExperiments))
+        browser.downloads.permissionRequester = { callback ->
+            pendingDownloadPermissionCallback = callback
+            storagePermissionLauncher.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
         if (supportsPip) {
             pictureInPicture = isInPictureInPictureMode
             ContextCompat.registerReceiver(
@@ -225,6 +248,10 @@ class MainActivity : ComponentActivity() {
         activeExperiments = ServerExperiments.pending(this)
         browser.customCertificateWarning = ServerExperiment.CERTIFICATE_WARNING.key in activeExperiments
         browser.setHomePresentation(homePresentation(activeExperiments))
+        browser.downloads.permissionRequester = { callback ->
+            pendingDownloadPermissionCallback = callback
+            storagePermissionLauncher.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -260,14 +287,13 @@ class MainActivity : ComponentActivity() {
 
     private fun enterCurrentVideoPip(): Boolean {
         val tab = browser.current ?: return false
-        val aspect = if (tab.media != null) {
-            nativePlayer?.takeIf { it.isPlaying }?.videoSize?.let { size ->
-                if (size.width > 0 && size.height > 0) {
-                    videoAspect((size.width * size.pixelWidthHeightRatio).toLong(), size.height.toLong())
-                } else null
-            }
-        } else tab.fullscreenAspect.takeIf { tab.fullscreen && tab.webPlaying }
-        return aspect?.let(::enterVideoPip) ?: false
+        if (tab.media == null) return false
+        val aspect = nativePlayer?.takeIf { it.isPlaying }?.videoSize?.let { size ->
+            if (size.width > 0 && size.height > 0) {
+                videoAspect((size.width * size.pixelWidthHeightRatio).toLong(), size.height.toLong())
+            } else null
+        } ?: return false
+        return enterVideoPip(aspect)
     }
 
     @RequiresApi(26)
@@ -383,6 +409,12 @@ internal object BrowserRuntime {
             for (cipher in TlsCipherSuite.entries) {
                 appendLine("  ${cipher.preference}: ${cipher in enabledCiphers}")
             }
+            if (enabledCiphers.none { it.tls13 }) {
+                appendLine("  security.tls.version.max: 3")
+            }
+            if (enabledCiphers.none { !it.tls13 }) {
+                appendLine("  security.tls.version.min: 4")
+            }
         })
         val settings = GeckoRuntimeSettings.Builder()
             .configFilePath(config.absolutePath)
@@ -415,11 +447,21 @@ private class BrowserTabs(
     private val runtime = BrowserRuntime.get(context)
     val executor = GeckoWebExecutor(runtime)
     val downloads = BrowserDownloads.get(context)
+    val history = BrowserHistory.get(context)
     private val homeClient = HomeSessionClient(context, executor)
     private val homeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val homeRequests = mutableMapOf<BrowserSession, kotlinx.coroutines.Job>()
     var nativeHomeSections by mutableStateOf<List<HomeSection>?>(null)
         private set
+    var nativeHomeWeather by mutableStateOf<WeatherInfo?>(null)
+        private set
+    var weatherUpdating by mutableStateOf(false)
+        private set
+    var weatherError by mutableStateOf<String?>(null)
+        private set
+    var incognito by mutableStateOf(false)
+        private set
+    val savedWeatherLocation get() = homeClient.savedWeatherLocation()
     var cookiesAllowed by mutableStateOf(preferences.getBoolean(COOKIES_ALLOWED, true))
         private set
     var thirdPartyCookiesAllowed by mutableStateOf(preferences.getBoolean(THIRD_PARTY_COOKIES_ALLOWED, true))
@@ -463,7 +505,10 @@ private class BrowserTabs(
 
     fun newTab(url: String = "", popup: Boolean = false): BrowserSession {
         val home = !popup && (url.isEmpty() || url.substringBefore('#') == HOME_URL)
-        val tab = BrowserSession(nextTabId++, runtime, preferences, if (home) "" else url, popup, downloads, { customCertificateWarning }) {
+        val tab = BrowserSession(
+            nextTabId++, runtime, preferences, if (home) "" else url, popup, downloads, history, executor,
+            incognito, { customCertificateWarning }
+        ) {
             newTab(popup = true).session
         }
         tabs.add(tab)
@@ -471,6 +516,17 @@ private class BrowserTabs(
         select(tab)
         if (home) openHome(tab)
         return tab
+    }
+
+    fun toggleIncognito() {
+        incognito = !incognito
+        homeRequests.values.forEach { it.cancel() }
+        homeRequests.clear()
+        val oldTabs = tabs.toList()
+        tabs.clear()
+        current = null
+        oldTabs.forEach { it.close() }
+        newTab()
     }
 
     fun openHome(tab: BrowserSession) {
@@ -482,19 +538,47 @@ private class BrowserTabs(
     private fun openNativeHome(tab: BrowserSession) {
         tab.showNativeHome()
         tab.beginHomeLoading()
-        val selectedTheme = dark
         homeRequests[tab] = homeScope.launch {
             try {
-                val sections = withContext(Dispatchers.IO) {
-                    runCatching { homeClient.loadNativeHome(selectedTheme) }.getOrNull()
+                val data = withContext(Dispatchers.IO) {
+                    runCatching { homeClient.loadNativeHome() }.getOrNull()
                 }
                 if (!tabs.contains(tab) || !tab.nativeHome) return@launch
-                if (sections != null) nativeHomeSections = sections
+                if (data != null) {
+                    nativeHomeSections = data.sections
+                    nativeHomeWeather = data.weather
+                }
                 tab.finishHomeLoading()
             } finally {
                 if (homeRequests[tab] === coroutineContext[kotlinx.coroutines.Job]) homeRequests.remove(tab)
             }
         }
+    }
+
+    suspend fun searchWeatherLocations(query: String): List<WeatherLocationResult> =
+        withContext(Dispatchers.IO) { homeClient.searchWeatherLocations(query) }
+
+    fun updateWeather(location: String, label: String? = null) {
+        if (weatherUpdating) return
+        weatherUpdating = true
+        weatherError = null
+        homeScope.launch {
+            try {
+                val updated = withContext(Dispatchers.IO) {
+                    runCatching { homeClient.updateWeather(location, label) }
+                }
+                updated.onSuccess { nativeHomeWeather = it }
+                updated.onFailure { weatherError = "Could not load weather for \"${label ?: location}\"." }
+            } finally {
+                weatherUpdating = false
+            }
+        }
+    }
+
+    fun refreshWeather() {
+        val saved = homeClient.savedWeatherLocation()
+        if (saved.isBlank()) return
+        updateWeather(saved, homeClient.savedWeatherLabel().takeIf { it.isNotBlank() })
     }
 
     fun reload(tab: BrowserSession) {
@@ -553,7 +637,6 @@ private class BrowserTabs(
     fun setTheme(value: Boolean) {
         dark = value
         preferences.edit().putBoolean("dark", value).apply()
-        tabs.filter { it.nativeHome }.forEach(::openHome)
     }
 
     fun updateCookiePolicy(allowed: Boolean) {
@@ -599,6 +682,9 @@ private class BrowserSession(
     restore: String,
     popup: Boolean,
     private val downloads: BrowserDownloads,
+    private val history: BrowserHistory,
+    private val executor: GeckoWebExecutor,
+    private val incognito: Boolean,
     private val useCustomCertificateWarning: () -> Boolean,
     private val openPopup: () -> GeckoSession
 ) {
@@ -651,9 +737,6 @@ private class BrowserSession(
     private var mobilePageUrl: String? = null
     private var firstDesktopPage: String? = null
     private var modePageStarted = false
-    private var retryModeLoad = false
-    var reloadingModeTls by mutableStateOf(false)
-        private set
     private val modeHandler = android.os.Handler(android.os.Looper.getMainLooper())
     var nativeHome by mutableStateOf(false)
         private set
@@ -662,6 +745,7 @@ private class BrowserSession(
         private set
 
     private fun createSession() = GeckoSession(GeckoSessionSettings.Builder()
+        .usePrivateMode(incognito)
         .viewportMode(viewport())
         .userAgentMode(userAgentMode())
         .userAgentOverride(BrowserNetwork.agent(desktop))
@@ -669,9 +753,23 @@ private class BrowserSession(
 
     var session by mutableStateOf(createSession())
         private set
+    var pipSession by mutableStateOf<GeckoSession?>(null)
+        private set
+
+    fun clearPipSession() {
+        val old = pipSession
+        pipSession = null
+        if (old != null && old.isOpen) old.close()
+    }
 
     init {
         configureSession()
+        PlatformPip.configure(session, runtime, onEnter = { cloned ->
+            clearPipSession()
+            pipSession = cloned
+        }, onExit = {
+            clearPipSession()
+        })
         if (!popup) session.open(runtime)
         if (restore.toHttpUriOrNull() != null) navigate(restore)
     }
@@ -717,7 +815,6 @@ private class BrowserSession(
                 rejectedCertificate = uri
                     ?.takeIf { it.toHttpUriOrNull()?.scheme.equals("https", true) }
                     ?.let { failedUrl -> error.certificate?.let { failedUrl.substringBefore('#') to it } }
-                reloadingModeTls = false
                 finishHomeLoading()
                 security = null
                 return when (error.code) {
@@ -760,7 +857,7 @@ private class BrowserSession(
                     webMediaSession = null
                     webFeatures = MediaSession.Feature.NONE
                     fullscreenAspect = Rational(16, 9)
-                    security = security?.takeIf { it.optString("url").substringBefore('#') == url.substringBefore('#') }
+                    security = security?.takeIf { it.optString("url").sameOriginAs(url) }
                     failure = null
                     progress = 0
                 }
@@ -778,26 +875,12 @@ private class BrowserSession(
 
             override fun onPageStop(session: GeckoSession, success: Boolean) {
                 if (session !== this@BrowserSession.session || nativeHome) return
-                reloadingModeTls = false
                 traceMode("pageStop success=$success host=${url.toHttpUriOrNull()?.host} hasInspectorReport=${security != null}")
                 if (success && modePageStarted && desktop && mobilePageUrl != null && firstDesktopPage == null) {
                     firstDesktopPage = url.substringBefore('#')
                 }
-                if (success && modePageStarted && retryModeLoad) {
-                    retryModeLoad = false
-                    val loadedUrl = url.substringBefore('#')
-                    modeHandler.postDelayed({
-                        if (session === this@BrowserSession.session && !nativeHome &&
-                            url.substringBefore('#') == loadedUrl && progress == 100 &&
-                            security?.optString("url")?.substringBefore('#') != loadedUrl
-                        ) {
-                            traceMode("retrying mode navigation host=${url.toHttpUriOrNull()?.host}")
-                            reloadingModeTls = true
-                            session.reload(
-                                GeckoSession.LOAD_FLAGS_BYPASS_CACHE or GeckoSession.LOAD_FLAGS_BYPASS_PROXY
-                            )
-                        }
-                    }, 2_000)
+                if (success && url.toHttpUriOrNull() != null) {
+                    history.recordSite(url, title, executor, incognito)
                 }
                 progress = 100
             }
@@ -839,6 +922,9 @@ private class BrowserSession(
 
             override fun onTitleChange(session: GeckoSession, title: String?) {
                 this@BrowserSession.title = title.orEmpty()
+                if (!nativeHome && !title.isNullOrBlank() && url.toHttpUriOrNull() != null) {
+                    history.recordSite(url, title, executor, incognito)
+                }
             }
 
             override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
@@ -849,7 +935,7 @@ private class BrowserSession(
                     response.body?.let { runCatching { it.close() } }
                     media = MediaTarget(response.uri, mime)
                 } else if (response.statusCode in 200..299 && response.body != null) {
-                    downloads.receive(response)
+                    downloads.receive(response, incognito)
                 } else {
                     response.body?.let { runCatching { it.close() } }
                 }
@@ -894,7 +980,11 @@ private class BrowserSession(
                                 "tls=${message.optString("tls")} hasIp=${message.optString("ip").isNotEmpty()} " +
                                 "fromCache=${message.optBoolean("fromCache")}"
                         )
-                        if (message.optString("http").isNotEmpty()) security = message
+                        if (message.optString("http").isNotEmpty() || message.optString("tls").isNotEmpty() ||
+                            message.optString("navProtocol").isNotEmpty() || message.optString("ip").isNotEmpty()
+                        ) {
+                            security = message
+                        }
                     }
                     return GeckoResult.fromValue<Any>(true)
                 }
@@ -931,6 +1021,7 @@ private class BrowserSession(
 
     fun close() {
         modeHandler.removeCallbacksAndMessages(null)
+        clearPipSession()
         if (session.isOpen) session.close()
     }
 
@@ -960,7 +1051,6 @@ private class BrowserSession(
         val target = modeChangeUrl ?: return
         modeChangeUrl = null
         modePageStarted = false
-        retryModeLoad = true
         url = target
         traceMode("attached host=${target.toHttpUriOrNull()?.host} userAgentMode=${session.settings.userAgentMode} viewportMode=${session.settings.viewportMode} override=${session.settings.userAgentOverride}")
         session.load(GeckoSession.Loader().uri(target).flags(GeckoSession.LOAD_FLAGS_BYPASS_CACHE))
@@ -969,12 +1059,15 @@ private class BrowserSession(
     fun navigate(address: String) {
         val value = address.trim()
         if (value.isEmpty()) return
+        val isSearch = value.toHttpUriOrNull() == null &&
+            !(value.none(Char::isWhitespace) && ("." in value || value.startsWith("[") || value.startsWith("localhost")) &&
+                "https://$value".toHttpUriOrNull() != null)
         val target = when {
             value.toHttpUriOrNull() != null -> value
-            value.none(Char::isWhitespace) && ("." in value || value.startsWith("[") || value.startsWith("localhost")) &&
-                "https://$value".toHttpUriOrNull() != null -> "https://$value"
+            !isSearch -> "https://$value"
             else -> "https://www.google.com/search?q=${Uri.encode(value)}"
         }
+        if (isSearch) history.recordSearch(value, target, incognito)
         val mime = BrowserNetwork.mediaMime(target, null)
         if (mime != null) {
             media = MediaTarget(target, mime)
@@ -982,8 +1075,6 @@ private class BrowserSession(
         }
         finishHomeLoading()
         modeChangeUrl = null
-        retryModeLoad = false
-        reloadingModeTls = false
         modeHandler.removeCallbacksAndMessages(null)
         mobilePageUrl = null
         firstDesktopPage = null
@@ -1028,8 +1119,6 @@ private class BrowserSession(
 
     private fun replaceWebSession() {
         modeHandler.removeCallbacksAndMessages(null)
-        reloadingModeTls = false
-        retryModeLoad = false
         modePageStarted = false
         pendingUrl = null
         modeChangeUrl = null
@@ -1038,6 +1127,19 @@ private class BrowserSession(
         val previous = session
         session = createSession()
         configureSession()
+        PlatformPip.configure(session, runtime, onEnter = { cloned ->
+            clearPipSession()
+            pipSession = cloned
+        }, onExit = {
+            clearPipSession()
+        })
+        clearPipSession()
+        PlatformPip.configure(session, runtime, onEnter = { cloned ->
+            clearPipSession()
+            pipSession = cloned
+        }, onExit = {
+            clearPipSession()
+        })
         if (previous.isOpen) previous.close()
         fullscreen = false
         webPlaying = false
@@ -1069,7 +1171,7 @@ private class BrowserSession(
     }
 }
 
-private enum class Screen { Browser, Settings, Theme, HttpVersions, TlsCiphers, Cookies, Connection, Certificate, Downloads }
+private enum class Screen { Browser, Settings, Theme, HttpVersions, TlsCiphers, Cookies, Connection, Certificate, Downloads, History }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1185,20 +1287,23 @@ private fun BrowserContent(
         }
     }
     var options by remember { mutableStateOf(false) }
+    var addressFocused by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val initialContentFocus = remember { FocusRequester() }
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    LaunchedEffect(Unit) {
+        focus.clearFocus(force = true)
+        keyboardController?.hide()
+        runCatching { initialContentFocus.requestFocus() }
+    }
     val submit = {
         focus.clearFocus()
         browser.navigate(address.text.toString())
     }
     val webFullscreen = browser.fullscreen && screen == Screen.Browser && media == null
-    LaunchedEffect(browser, browser.videoPort, supportsPip, inPip) {
-        browser.updateWebPip(supportsPip, inPip)
-    }
-    LaunchedEffect(browser, browser.webPipRequested, webFullscreen, supportsPip) {
-        if (browser.webPipRequested && webFullscreen && supportsPip) {
-            browser.webPipRequested = false
-            enterPip(browser.fullscreenAspect)
-        }
+    LaunchedEffect(browser, browser.videoPort) {
+        browser.updateWebPip(false, false)
     }
     var nativeFullscreen by remember(browser, media) { mutableStateOf(false) }
     val immersiveVideo = (nativeFullscreen || webFullscreen) && !inPip
@@ -1233,6 +1338,7 @@ private fun BrowserContent(
                     Screen.TlsCiphers -> "TLS cipher suites"
                     Screen.Cookies -> "Cookies"
                     Screen.Downloads -> "Downloads"
+                    Screen.History -> "History"
                     Screen.Certificate -> "Certificate Details"
                     else -> "Connection details"
                 }, back
@@ -1254,7 +1360,9 @@ private fun BrowserContent(
                 ) {
                     BasicTextField(
                         state = address,
-                        modifier = Modifier.weight(1f).semantics { contentDescription = "Search or enter address" },
+                        modifier = Modifier.weight(1f)
+                            .onFocusChanged { addressFocused = it.isFocused }
+                            .semantics { contentDescription = "Search or enter address" },
                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         lineLimits = TextFieldLineLimits.SingleLine,
@@ -1276,7 +1384,7 @@ private fun BrowserContent(
                     )
                     val edited = address.text.toString() != displayedUrl
                     NavigationIcon(
-                        if (edited) Icons.Default.Search else Icons.Default.Refresh,
+                        if (edited) Icons.AutoMirrored.Filled.ArrowForward else Icons.Default.Refresh,
                         if (edited) "Go" else "Reload"
                     ) { if (edited) submit() else tabs.reload(browser) }
                 }
@@ -1284,10 +1392,18 @@ private fun BrowserContent(
                     focus.clearFocus()
                     openTabs()
                 }
-                NavigationIcon(Icons.Default.MoreVert, "Connection details") { screen = Screen.Connection }
+                NavigationIcon(
+                    if (ServerExperiment.CONNECTION_INFO_ICON.key in activeExperiments) Icons.Default.Info
+                    else Icons.Default.MoreVert,
+                    "Connection details"
+                ) { screen = Screen.Connection }
                 Box {
                     NavigationIcon(Icons.Default.Settings, "Options") { options = true }
-                    DropdownMenu(expanded = options, onDismissRequest = { options = false }) {
+                    DropdownMenu(
+                        expanded = options,
+                        onDismissRequest = { options = false },
+                        properties = androidx.compose.ui.window.PopupProperties(focusable = false)
+                    ) {
                         DropdownMenuItem(
                             text = { Text("Settings") }, leadingIcon = { Icon(Icons.Default.Settings, null) },
                             onClick = { options = false; screen = Screen.Settings }
@@ -1296,6 +1412,17 @@ private fun BrowserContent(
                             text = { Text("Downloads") }, leadingIcon = { Icon(Icons.Default.Download, null) },
                             onClick = { options = false; screen = Screen.Downloads }
                         )
+                        DropdownMenuItem(
+                            text = { Text("History") }, leadingIcon = { Icon(Icons.Default.History, null) },
+                            onClick = { options = false; screen = Screen.History }
+                        )
+                        if (ServerExperiment.INCOGNITO_MODE.key in activeExperiments) {
+                            DropdownMenuItem(
+                                text = { Text("Incognito") }, leadingIcon = { Icon(Icons.Default.VisibilityOff, null) },
+                                trailingIcon = { Checkbox(tabs.incognito, onCheckedChange = null) },
+                                onClick = { options = false; tabs.toggleIncognito() }
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Desktop site") }, leadingIcon = { Icon(Icons.Default.Computer, null) },
                             trailingIcon = { Checkbox(browser.desktop, onCheckedChange = null) },
@@ -1311,15 +1438,52 @@ private fun BrowserContent(
             }
         }
     }) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            when {
-                media != null && screen == Screen.Browser -> key(browser.id, browser.mediaReload) {
+        val isSettingsScreen = screen in setOf(
+            Screen.Settings, Screen.Theme, Screen.HttpVersions, Screen.TlsCiphers, Screen.Cookies
+        )
+        Box(
+            Modifier.fillMaxSize().padding(padding).pointerInput(addressFocused, imeVisible) {
+                if (!addressFocused || imeVisible) return@pointerInput
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.any { it.changedToDownIgnoreConsumed() }) {
+                            focus.clearFocus(force = true)
+                        }
+                    }
+                }
+            }
+        ) {
+            Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
+            if (media != null && !isSettingsScreen) {
+                key(browser.id, browser.mediaReload) {
                     VideoPlayer(
                         media, browser.desktop, tabs.executor, lifecycleOwner,
                         supportsPip, inPip, nativeFullscreen, enterPip,
                         { nativeFullscreen = !nativeFullscreen }, onNativePlayer
                     )
                 }
+            } else if (!browser.nativeHome && !isSettingsScreen) {
+                key(browser.session) {
+                    AndroidView(
+                        factory = { context ->
+                            val attachedSession = browser.session
+                            GeckoView(context).apply {
+                                setSession(attachedSession)
+                                doOnAttach { post { browser.onWebViewAttached(attachedSession) } }
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        onRelease = { it.releaseSession() },
+                        update = {
+                            val showSource = screen == Screen.Browser && browser.url.isNotEmpty() && browser.failure == null
+                            it.visibility = if (showSource) View.VISIBLE else View.INVISIBLE
+                        }
+                    )
+                }
+            }
+            when {
+                media != null && screen == Screen.Browser -> Unit
                 screen == Screen.Theme -> Column {
                     ThemeRow("Dark Theme", tabs.dark) { tabs.setTheme(true) }
                     ThemeRow("Light Theme", !tabs.dark) { tabs.setTheme(false) }
@@ -1347,7 +1511,18 @@ private fun BrowserContent(
                         Text("Restart BrowserEngine to apply this change.", Modifier.padding(16.dp))
                     }
                 }
-                screen == Screen.Downloads -> DownloadList(tabs.downloads)
+                screen == Screen.Downloads -> Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    DownloadList(
+                        tabs.downloads,
+                        enhanced = ServerExperiment.ENHANCED_DOWNLOADS.key in activeExperiments
+                    )
+                }
+                screen == Screen.History -> Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    HistoryList(tabs.history) { url ->
+                        screen = Screen.Browser
+                        browser.navigate(url)
+                    }
+                }
                 screen == Screen.Settings -> Column(Modifier.verticalScroll(rememberScrollState())) {
                     ListItem(
                         headlineContent = { Text("Theme") }, supportingContent = { Text(if (tabs.dark) "Dark Theme" else "Light Theme") },
@@ -1386,45 +1561,46 @@ private fun BrowserContent(
                         trailingContent = { Switch(tabs.websiteCacheDisabled, tabs::updateWebsiteCache) }
                     )
                     ServerExperimentSettings(activeExperiments)
-                    ListItem(headlineContent = { Text("About BrowserEngine") },
-                        supportingContent = { Text("Version ${BuildConfig.VERSION_NAME} · GeckoView 143") })
-                }
-                screen == Screen.Connection -> ConnectionScreen(
-                    browser,
-                    showCertificate = if (ServerExperiment.CERTIFICATE_DETAILS.key in activeExperiments &&
-                        browser.displayUrl.toHttpUriOrNull()?.scheme.equals("https", true)
-                    ) ({ screen = Screen.Certificate }) else null,
-                    reload = { screen = Screen.Browser; browser.reload(bypassCache = true) }
-                )
-                screen == Screen.Certificate -> CertificateDetails(browser.certificate, browser.certificateRejected)
-                else -> {
-                    if (!browser.nativeHome) {
-                        key(browser.session) {
-                            AndroidView(
-                                factory = { context ->
-                                    val attachedSession = browser.session
-                                    GeckoView(context).apply {
-                                        setSession(attachedSession)
-                                        doOnAttach { post { browser.onWebViewAttached(attachedSession) } }
-                                    }
-                                },
-                                modifier = Modifier.fillMaxSize(),
-                                onRelease = { it.releaseSession() },
-                                update = {
-                                    it.visibility = if (browser.url.isEmpty() || browser.failure != null)
-                                        View.INVISIBLE else View.VISIBLE
-                                }
-                            )
-                        }
+                    val geckoVersion = remember {
+                        GeckoSession.getDefaultUserAgent().substringAfter("rv:", "").substringBefore(")")
+                            .ifBlank { BuildConfig.GECKOVIEW_MAJOR }
                     }
+                    ListItem(headlineContent = { Text("About BrowserEngine") },
+                        supportingContent = { Text("Version ${BuildConfig.VERSION_NAME} · GeckoView $geckoVersion") })
+                }
+                screen == Screen.Connection -> Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    ConnectionScreen(
+                        browser,
+                        showCertificate = if (ServerExperiment.CERTIFICATE_DETAILS.key in activeExperiments &&
+                            browser.displayUrl.toHttpUriOrNull()?.scheme.equals("https", true)
+                        ) ({ screen = Screen.Certificate }) else null,
+                        reload = { screen = Screen.Browser; browser.reload(bypassCache = true) }
+                    )
+                }
+                screen == Screen.Certificate -> Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    CertificateDetails(browser.certificate, browser.certificateRejected)
+                }
+                else -> {
                     when {
                         browser.nativeHome -> NativeHomeScreen(
-                            tabs.nativeHomeSections, browser.homeLoading,
+                            tabs.nativeHomeSections,
+                            tabs.nativeHomeWeather,
+                            tabs.savedWeatherLocation,
+                            tabs.weatherUpdating,
+                            tabs.weatherError,
+                            browser.homeLoading,
+                            tabs.incognito,
+                            tabs.executor,
                             search = { query ->
                                 focus.clearFocus()
-                                browser.navigate("https://www.google.com/search?q=${Uri.encode(query)}")
+                                val searchUrl = "https://www.google.com/search?q=${Uri.encode(query)}"
+                                tabs.history.recordSearch(query, searchUrl, tabs.incognito)
+                                browser.navigate(searchUrl)
                             },
                             navigate = browser::navigate,
+                            searchLocations = tabs::searchWeatherLocations,
+                            updateWeather = tabs::updateWeather,
+                            refreshWeather = tabs::refreshWeather,
                             retry = { tabs.openHome(browser) }
                         )
                         browser.homeLoading -> Column(
@@ -1445,6 +1621,25 @@ private fun BrowserContent(
                                     Image(painterResource(R.drawable.ic_browser), "BrowserEngine icon", Modifier.size(96.dp))
                                     Spacer(Modifier.height(20.dp))
                                     Text("BrowserEngine", style = MaterialTheme.typography.headlineLarge)
+                                    if (tabs.incognito) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.VisibilityOff,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                            Text(
+                                                "Incognito Mode",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1462,25 +1657,46 @@ private fun BrowserContent(
                     ) {
                         LinearProgressIndicator(progress = { browser.progress / 100f }, modifier = Modifier.fillMaxWidth())
                     }
-                }
-            }
-        }
-    }
-    if (!inPip && browser.reloadingModeTls) {
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = {},
-            properties = androidx.compose.ui.window.DialogProperties(
-                dismissOnBackPress = false, dismissOnClickOutside = false
-            )
-        ) {
-            Surface(shape = MaterialTheme.shapes.large) {
-                Column(
-                    Modifier.padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    CircularProgressIndicator()
-                    Text("Getting Desktop Mode TLS Information, Reloading Page.")
+                    val typed = address.text.toString().trim()
+                    if (addressFocused && typed.isNotEmpty() && typed != displayedUrl) {
+                        val matches = tabs.history.entries.filter {
+                            it.title.contains(typed, ignoreCase = true) || it.url.contains(typed, ignoreCase = true)
+                        }.take(6)
+                        if (matches.isNotEmpty()) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                tonalElevation = 6.dp,
+                                shadowElevation = 6.dp
+                            ) {
+                                Column {
+                                    matches.forEach { item ->
+                                        val favicon = if (item.type == HistoryType.SITE) tabs.history.iconFor(item.host) else null
+                                        ListItem(
+                                            headlineContent = { Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                            supportingContent = { Text(item.url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                            leadingContent = {
+                                                when {
+                                                    item.type == HistoryType.SEARCH -> Icon(Icons.Default.Search, contentDescription = null)
+                                                    favicon != null -> Image(
+                                                        bitmap = favicon,
+                                                        contentDescription = null,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier.size(24.dp).clip(MaterialTheme.shapes.extraSmall)
+                                                    )
+                                                    else -> Icon(Icons.Default.Public, contentDescription = null)
+                                                }
+                                            },
+                                            modifier = Modifier.clickable {
+                                                focus.clearFocus()
+                                                browser.navigate(item.url)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1495,7 +1711,7 @@ private fun BrowserContent(
             dismissButton = {
                 TextButton(onClick = {
                     browser.mediaChoice = null
-                    tabs.downloads.fetch(tabs.executor, target.url, browser.desktop)
+                    tabs.downloads.fetch(tabs.executor, target.url, browser.desktop, tabs.incognito)
                 }) { Text("Download") }
             }
         )
@@ -1508,7 +1724,7 @@ private fun BrowserContent(
             confirmButton = {
                 TextButton(onClick = {
                     browser.downloadChoice = null
-                    tabs.downloads.fetch(tabs.executor, url, browser.desktop)
+                    tabs.downloads.fetch(tabs.executor, url, browser.desktop, tabs.incognito)
                 }) { Text("Download") }
             },
             dismissButton = { TextButton(onClick = { browser.downloadChoice = null }) { Text("Cancel") } }
@@ -1744,9 +1960,17 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     reload: () -> Unit
 ) {
     val url = browser.displayUrl.toHttpUriOrNull()
-    val info = browser.security?.takeIf { it.optString("url").toHttpUriOrNull() == url?.buildUpon()?.fragment(null)?.build() }
+    val info = browser.security?.takeIf { it.optString("url").sameOriginAs(browser.displayUrl) }
     fun field(name: String) = info?.optString(name).orEmpty()
     fun show(value: String) = value.ifBlank { "Unavailable" }
+    val httpDisplay = field("http").ifBlank {
+        when (field("navProtocol").lowercase()) {
+            "h3" -> "HTTP/3"
+            "h2" -> "HTTP/2"
+            "http/1.1" -> "HTTP/1.1"
+            else -> ""
+        }
+    }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1774,7 +1998,7 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
             ListItem(headlineContent = { Text("Key exchange") }, supportingContent = { Text(show(keyExchangeLabel(field("keyExchange")))) })
             ListItem(headlineContent = { Text("TLS version") }, supportingContent = { Text(show(tlsVersionLabel(field("tls")))) })
         }
-        ListItem(headlineContent = { Text("HTTP version") }, supportingContent = { Text(show(httpVersionLabel(field("http")))) })
+        ListItem(headlineContent = { Text("HTTP version") }, supportingContent = { Text(show(httpVersionLabel(httpDisplay))) })
         val ip = remoteAddressLabel(field("ip"))
         val cached = info?.optBoolean("fromCache") == true
         ListItem(
@@ -1933,22 +2157,137 @@ private fun ServerExperimentSettings(active: Set<String>) {
 }
 
 @Composable
-private fun DownloadList(downloads: BrowserDownloads) {
+private fun DownloadList(downloads: BrowserDownloads, enhanced: Boolean) {
     val context = LocalContext.current
+    var renaming by remember { mutableStateOf<BrowserDownload?>(null) }
+    var renameInput by remember { mutableStateOf("") }
+
     if (downloads.entries.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No downloads yet") }
         return
     }
     LazyColumn(Modifier.fillMaxSize()) {
         items(downloads.entries, key = { it.id }) { download ->
-            ListItem(
-                headlineContent = { Text(download.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                supportingContent = { Text(download.state.label) },
-                leadingContent = { Icon(Icons.Default.InsertDriveFile, null) },
-                modifier = Modifier.clickable(enabled = download.state == DownloadState.COMPLETE) {
-                    downloads.open(context, download)
+            val subtitle = if (enhanced && download.state == DownloadState.DOWNLOADING) {
+                val speed = BrowserDownloads.formatSpeed(download.speedBytesPerSec)
+                val eta = BrowserDownloads.formatEta(download.etaSeconds)
+                "$speed · $eta"
+            } else {
+                download.state.label
+            }
+            Column {
+                ListItem(
+                    headlineContent = { Text(download.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = { Text(subtitle) },
+                    leadingContent = { Icon(Icons.Default.InsertDriveFile, null) },
+                    trailingContent = when {
+                        download.state == DownloadState.DOWNLOADING -> {
+                            {
+                                IconButton(onClick = { downloads.cancelAndDelete(download) }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Cancel download")
+                                }
+                            }
+                        }
+                        enhanced -> {
+                            {
+                                Row {
+                                    IconButton(onClick = {
+                                        renaming = download
+                                        renameInput = download.name
+                                    }) {
+                                        Icon(Icons.Default.Edit, contentDescription = "Rename")
+                                    }
+                                    IconButton(onClick = { downloads.delete(download) }) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                    }
+                                }
+                            }
+                        }
+                        else -> null
+                    },
+                    modifier = Modifier.clickable(enabled = download.state == DownloadState.COMPLETE) {
+                        downloads.open(context, download)
+                    }
+                )
+                if (enhanced && download.state == DownloadState.DOWNLOADING) {
+                    if (download.totalBytes > 0) {
+                        val ratio = (download.bytesDownloaded.toFloat() / download.totalBytes.toFloat()).coerceIn(0f, 1f)
+                        LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    }
                 }
-            )
+            }
+        }
+    }
+
+    renaming?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Rename file") },
+            text = {
+                OutlinedTextField(
+                    value = renameInput,
+                    onValueChange = { renameInput = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = renameInput.isNotBlank(),
+                    onClick = {
+                        downloads.rename(target, renameInput)
+                        renaming = null
+                    }
+                ) { Text("Rename") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renaming = null }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun HistoryList(history: BrowserHistory, onOpen: (String) -> Unit) {
+    if (history.entries.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No history yet") }
+        return
+    }
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.End
+        ) {
+            TextButton(onClick = history::clear) { Text("Clear history") }
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(history.entries, key = { it.id }) { item ->
+                val favicon = if (item.type == HistoryType.SITE) history.iconFor(item.host) else null
+                ListItem(
+                    headlineContent = { Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = { Text(item.url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    leadingContent = {
+                        when {
+                            item.type == HistoryType.SEARCH -> Icon(Icons.Default.Search, contentDescription = null)
+                            favicon != null -> Image(
+                                bitmap = favicon,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(24.dp).clip(MaterialTheme.shapes.extraSmall)
+                            )
+                            else -> Icon(Icons.Default.Public, contentDescription = null)
+                        }
+                    },
+                    trailingContent = {
+                        IconButton(onClick = { history.remove(item.id) }) {
+                            Icon(Icons.Default.Close, contentDescription = "Remove")
+                        }
+                    },
+                    modifier = Modifier.clickable { onOpen(item.url) }
+                )
+            }
         }
     }
 }

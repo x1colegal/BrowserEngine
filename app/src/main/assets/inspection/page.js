@@ -10,9 +10,11 @@
       const latest = await browser.runtime.sendMessage("connection").catch(() => null);
       if (current !== generation) return;
       if (latest) details = latest;
-      if (details) {
-        const received = await browser.runtime.sendNativeMessage("connection", details).catch(() => false);
-        if (received && details.http) return;
+      const navProtocol = performance.getEntriesByType("navigation")[0]?.nextHopProtocol || "";
+      const payload = details ? {...details, navProtocol} : (navProtocol ? {url: location.href, navProtocol} : null);
+      if (payload) {
+        const received = await browser.runtime.sendNativeMessage("connection", payload).catch(() => false);
+        if (received && (payload.http || payload.tls)) return;
       }
     }
   }

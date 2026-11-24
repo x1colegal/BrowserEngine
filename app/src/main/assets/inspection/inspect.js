@@ -1,10 +1,31 @@
 const pageRequests = {urls: ["http://*/*", "https://*/*"], types: ["main_frame"]};
 const connections = new Map();
 const lastPeers = new Map();
+const lastOriginReports = new Map();
+
+function saveOriginReport(tabId, report) {
+  if (tabId < 0 || !report?.url) return;
+  if (!report.http && !report.tls && !report.cipher) return;
+  try {
+    const origin = new URL(report.url).origin;
+    let map = lastOriginReports.get(tabId);
+    if (!map) {
+      map = new Map();
+      lastOriginReports.set(tabId, map);
+    }
+    const {id, ready, ...clean} = report;
+    map.set(origin, clean);
+  } catch (_) {}
+}
 
 browser.webRequest.onBeforeRequest.addListener(request => {
   if (request.tabId >= 0) {
-    connections.set(request.tabId, {id: request.requestId, url: request.url});
+    const existing = connections.get(request.tabId);
+    if (existing && existing.id === request.requestId) {
+      existing.url = request.url;
+    } else {
+      connections.set(request.tabId, {id: request.requestId, url: request.url});
+    }
   }
 }, pageRequests);
 
@@ -38,16 +59,27 @@ browser.webRequest.onHeadersReceived.addListener(async request => {
     connections.set(request.tabId, details);
   }
   recordPeer(details, request);
-  details.ready = browser.webRequest.getSecurityInfo(request.requestId).catch(() => null).then(info => Object.assign(details, {
-    http: request.statusLine?.split(" ")[0] || "",
-    cipher: info?.cipherSuite || "",
-    keyExchange: info?.keaGroupName || "",
-    tls: info?.protocolVersion || "",
-    state: info?.state || "",
-    fromCache: Boolean(request.fromCache)
-  }));
+  details.ready = browser.webRequest.getSecurityInfo(request.requestId).catch(() => null).then(info => {
+    Object.assign(details, {
+      http: request.statusLine?.split(" ")[0] || "",
+      cipher: info?.cipherSuite || "",
+      keyExchange: info?.keaGroupName || "",
+      tls: info?.protocolVersion || "",
+      state: info?.state || "",
+      fromCache: Boolean(request.fromCache)
+    });
+    saveOriginReport(request.tabId, details);
+    return details;
+  });
   await details.ready;
 }, pageRequests, ["blocking"]);
+
+browser.webRequest.onBeforeRedirect.addListener(request => {
+  const details = connections.get(request.tabId);
+  if (details && details.id === request.requestId && request.redirectUrl) {
+    details.url = request.redirectUrl;
+  }
+}, pageRequests);
 
 browser.webRequest.onResponseStarted.addListener(request => {
   const details = connections.get(request.tabId);
@@ -55,15 +87,25 @@ browser.webRequest.onResponseStarted.addListener(request => {
   recordPeer(details, request);
   details.fromCache = Boolean(request.fromCache);
   details.http ||= request.statusLine?.split(" ")[0] || "";
+  saveOriginReport(request.tabId, details);
 }, pageRequests);
 
 browser.runtime.onMessage.addListener((message, sender) => {
   if (message !== "connection" || sender.frameId !== 0 || !sender.tab || !sender.url) return;
+  const senderOrigin = new URL(sender.url).origin;
   const details = connections.get(sender.tab.id);
-  if (!details || new URL(sender.url).href.split("#")[0] !== new URL(details.url).href.split("#")[0]) return;
+  const fallback = lastOriginReports.get(sender.tab.id)?.get(senderOrigin);
+  if (!details) return fallback ? Promise.resolve(fallback) : undefined;
+  let detailsOrigin = "";
+  try { detailsOrigin = new URL(details.url).origin; } catch (_) {}
+  if (senderOrigin !== detailsOrigin) {
+    return fallback ? Promise.resolve(fallback) : undefined;
+  }
   return Promise.resolve(details.ready).then(() => {
-    if (connections.get(sender.tab.id) !== details) return;
     const {id, ready, ...report} = details;
+    if (!report.http && !report.tls && !report.cipher && fallback) {
+      return {...fallback, url: sender.url, fromCache: true};
+    }
     return report;
   });
 });
@@ -71,4 +113,5 @@ browser.runtime.onMessage.addListener((message, sender) => {
 browser.tabs.onRemoved.addListener(tabId => {
   connections.delete(tabId);
   lastPeers.delete(tabId);
+  lastOriginReports.delete(tabId);
 });
