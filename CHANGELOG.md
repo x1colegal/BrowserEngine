@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12
+
+- Fix home reload state when toggling between Incognito and normal mode while the home feed is loading.
+
 ## 1.11
 
 - Update feature flag API paths.

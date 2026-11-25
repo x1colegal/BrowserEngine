@@ -571,6 +571,9 @@ private class BrowserTabs(
         incognito = !incognito
         homeRequests.values.forEach { it.cancel() }
         homeRequests.clear()
+        homeBackoffSeconds = 0
+        nativeHomeSections = null
+        nativeHomeWeather = null
         val oldTabs = tabs.toList()
         tabs.clear()
         current = null
@@ -589,13 +592,17 @@ private class BrowserTabs(
         tab.beginHomeLoading()
         homeBackoffSeconds = 0
         homeRequests[tab] = homeScope.launch {
+            val requestJob = coroutineContext[kotlinx.coroutines.Job]
             try {
                 val data = withContext(Dispatchers.IO) {
                     runCatching {
                         homeClient.loadNativeHome { seconds ->
-                            homeBackoffSeconds = seconds
+                            if (homeRequests[tab] === requestJob) {
+                                homeBackoffSeconds = seconds
+                            }
                         }
                     }.onFailure {
+                        if (it is kotlinx.coroutines.CancellationException) throw it
                         android.util.Log.e("BrowserHome", "Failed to load native home", it)
                     }.getOrNull()
                 }
@@ -607,8 +614,8 @@ private class BrowserTabs(
                 }
                 tab.finishHomeLoading()
             } finally {
-                homeBackoffSeconds = 0
                 if (homeRequests[tab] === coroutineContext[kotlinx.coroutines.Job]) {
+                    homeBackoffSeconds = 0
                     homeRequests.remove(tab)
                     tab.finishHomeLoading()
                 }
