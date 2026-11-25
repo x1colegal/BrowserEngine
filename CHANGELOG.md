@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5
+
+- Add update-available prompts when a version is deprecated or no longer supported, with an **Update** button linking to GitHub Releases.
+- Immediately check for updated feature flags after an app update.
+- Move app preferences storage from Android `shared_prefs` to `files/prefs/*.xml` (`windows-1252`).
+- Add experimental weather loading placeholder (`weather_loading_placeholder`) and Chromium-inspired tab grid thumbnails (`tab_thumbnails`).
+- Only open a new tab from web requests when explicitly triggered by a user gesture for a new window.
+- Add a countdown loading indicator on the native home screen when the server requests a short wait before loading.
+- Downgrade the `legacy` flavor (Android 5.0–7.1, `minSdk 21`) to GeckoView `143.0.20251003115653` to restore native 32-bit `x86` support.
+
 ## 1.4
 
 - Split builds into `modern` (Android 8+, auto-tracking the latest GeckoView release) and `legacy` (Android 5.0–7.1, `minSdk 21` with GeckoView `144.0.20251027123126`) from a shared codebase.

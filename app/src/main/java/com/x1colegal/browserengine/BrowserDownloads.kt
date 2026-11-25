@@ -54,7 +54,7 @@ internal enum class DownloadState(val label: String) {
 }
 
 internal class BrowserDownloads private constructor(private val app: Context) {
-    private val prefs = app.getSharedPreferences("downloads", Context.MODE_PRIVATE)
+    private val prefs = AppPrefs.get(app, "downloads")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val activeJobs = mutableMapOf<String, Job>()
     private val activeCancels = mutableMapOf<String, () -> Unit>()

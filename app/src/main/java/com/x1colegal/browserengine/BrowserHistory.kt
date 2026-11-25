@@ -37,7 +37,7 @@ internal data class HistoryEntry(
 )
 
 internal class BrowserHistory private constructor(private val app: Context) {
-    private val prefs = app.getSharedPreferences("browser_history", Context.MODE_PRIVATE)
+    private val prefs = AppPrefs.get(app, "browser_history")
     private val faviconDir = app.filesDir.resolve("favicons")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val memoryCache = LruCache<String, ImageBitmap>(64)

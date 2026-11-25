@@ -10,15 +10,15 @@ android {
         applicationId = "com.x1colegal.browserengine"
         minSdk = 21
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.4"
+        versionCode = 11
+        versionName = "1.5"
     }
     flavorDimensions += "engine"
     productFlavors {
         create("legacy") {
             dimension = "engine"
             minSdk = 21
-            buildConfigField("String", "GECKOVIEW_MAJOR", "\"144\"")
+            buildConfigField("String", "GECKOVIEW_MAJOR", "\"143\"")
         }
         create("modern") {
             dimension = "engine"
@@ -43,7 +43,7 @@ dependencies {
     implementation("androidx.work:work-runtime:2.10.1")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    "legacyImplementation"("org.mozilla.geckoview:geckoview:144.0.20251027123126")
+    "legacyImplementation"("org.mozilla.geckoview:geckoview:143.0.20251003115653")
     "modernImplementation"("org.mozilla.geckoview:geckoview:+")
     implementation("com.google.android.exoplayer:exoplayer-core:2.19.1")
     implementation("com.google.android.exoplayer:exoplayer-hls:2.19.1")

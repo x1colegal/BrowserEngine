@@ -149,6 +149,8 @@ internal fun NativeHomeScreen(
     savedLocation: String,
     weatherUpdating: Boolean,
     weatherError: String?,
+    weatherLoadingPlaceholder: Boolean,
+    backoffSeconds: Int,
     loading: Boolean,
     incognito: Boolean,
     executor: GeckoWebExecutor,
@@ -233,6 +235,7 @@ internal fun NativeHomeScreen(
             item(key = "weather", contentType = "weather") {
                 WeatherCard(
                     weather = weather,
+                    loading = weatherLoadingPlaceholder && (loading || weatherUpdating),
                     updating = weatherUpdating,
                     error = weatherError,
                     onRefresh = refreshWeather,
@@ -245,7 +248,22 @@ internal fun NativeHomeScreen(
             }
             if (loading && sections == null) {
                 item(key = "loading", contentType = "loading") {
-                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                    if (backoffSeconds > 0) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text(
+                                "Loading, Waiting ${backoffSeconds}s...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                    }
                 }
             }
             if (!loading && sections == null) {
@@ -335,6 +353,7 @@ internal fun NativeHomeScreen(
 @Composable
 private fun WeatherCard(
     weather: WeatherInfo?,
+    loading: Boolean,
     updating: Boolean,
     error: String?,
     onRefresh: () -> Unit,
@@ -392,6 +411,7 @@ private fun WeatherCard(
         colors = CardDefaults.cardColors(containerColor = bgColor)
     ) {
         if (weather == null) {
+            val showLoading = loading && error == null
             Row(
                 Modifier.fillMaxWidth().padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -399,14 +419,22 @@ private fun WeatherCard(
             ) {
                 Icon(icon, contentDescription = null, tint = accentColor, modifier = Modifier.size(36.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Weather", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        error ?: "Set your city to view local weather.",
+                        if (showLoading) "Loading..." else "Weather",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        when {
+                            showLoading -> "Loading Weather, Please Wait"
+                            error != null -> error
+                            else -> "Set your city to view local weather."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (updating) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                if (updating || showLoading) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                 else IconButton(onClick = onEdit) {
                     Icon(Icons.Default.LocationOn, contentDescription = "Set weather location")
                 }
