@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9
+
+- Fix tapping an address-bar history suggestion after closing the keyboard being ignored instead of opening the page.
+
 ## 1.8
 
 - Fix the reload button becoming unavailable when switching back from Incognito mode to normal mode.

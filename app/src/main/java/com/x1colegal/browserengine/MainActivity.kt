@@ -1768,8 +1768,8 @@ private fun BrowserContent(
                 if (!addressFocused || imeVisible) return@pointerInput
                 awaitPointerEventScope {
                     while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.changes.any { it.changedToDownIgnoreConsumed() }) {
+                        val event = awaitPointerEvent(PointerEventPass.Final)
+                        if (event.changes.any { !it.isConsumed && it.changedToDownIgnoreConsumed() }) {
                             focus.clearFocus(force = true)
                         }
                     }
