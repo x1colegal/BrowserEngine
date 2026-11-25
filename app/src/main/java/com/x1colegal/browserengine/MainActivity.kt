@@ -608,7 +608,10 @@ private class BrowserTabs(
                 tab.finishHomeLoading()
             } finally {
                 homeBackoffSeconds = 0
-                if (homeRequests[tab] === coroutineContext[kotlinx.coroutines.Job]) homeRequests.remove(tab)
+                if (homeRequests[tab] === coroutineContext[kotlinx.coroutines.Job]) {
+                    homeRequests.remove(tab)
+                    tab.finishHomeLoading()
+                }
             }
         }
     }

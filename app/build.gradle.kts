@@ -10,19 +10,21 @@ android {
         applicationId = "com.x1colegal.browserengine"
         minSdk = 21
         targetSdk = 36
-        versionCode = 13
-        versionName = "1.7"
+        versionCode = 14
+        versionName = "1.8"
     }
     flavorDimensions += "engine"
     productFlavors {
         create("legacy") {
             dimension = "engine"
             minSdk = 21
+            versionNameSuffix = "-legacy"
             buildConfigField("String", "GECKOVIEW_MAJOR", "\"143\"")
         }
         create("modern") {
             dimension = "engine"
             minSdk = 26
+            versionNameSuffix = "-modern"
             buildConfigField("String", "GECKOVIEW_MAJOR", "\"161\"")
         }
     }

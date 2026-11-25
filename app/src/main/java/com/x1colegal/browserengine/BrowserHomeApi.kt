@@ -156,6 +156,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
         return null
     }
 
+    @Synchronized
     private fun getOrCreate(): HomeCredentials {
         cachedSession()?.let { return it }
         val created = apiRequest(appContext, executor, "/api/create/session")
@@ -175,8 +176,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
         return HomeCredentials(id, bearer, expires)
     }
 
-    @Synchronized
-    fun loadNativeHome(onBackoff: (Int) -> Unit = {}): HomeFeedData {
+    suspend fun loadNativeHome(onBackoff: (Int) -> Unit = {}): HomeFeedData {
         fun fetchWithSessionRefresh(): Pair<HomeCredentials, JSONObject> {
             var session = getOrCreate()
             val feed = try {
@@ -201,7 +201,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             try {
                 for (remaining in backoff downTo 1) {
                     onBackoff(remaining)
-                    Thread.sleep(1000L)
+                    kotlinx.coroutines.delay(1000L)
                 }
             } finally {
                 onBackoff(0)

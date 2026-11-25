@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.8
+
+- Fix the reload button becoming unavailable when switching back from Incognito mode to normal mode.
+- Append `-modern` or `-legacy` to `versionName` for each build flavor.
+
 ## 1.7
 
 - Proxy and cache native home news images through the BrowserEngine server.
