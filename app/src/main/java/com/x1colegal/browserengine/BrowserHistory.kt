@@ -44,6 +44,7 @@ internal class BrowserHistory private constructor(private val app: Context) {
     private val attemptedHosts = mutableSetOf<String>()
     val entries = mutableStateListOf<HistoryEntry>()
     val icons = mutableStateMapOf<String, ImageBitmap>()
+    private val suppressedDownloadUrls = mutableMapOf<String, Long>()
 
     init {
         val records = runCatching { JSONArray(prefs.getString("entries", "[]")) }.getOrElse { JSONArray() }
@@ -66,8 +67,19 @@ internal class BrowserHistory private constructor(private val app: Context) {
         addEntry(HistoryEntry(UUID.randomUUID().toString(), HistoryType.SEARCH, clean, url, "", System.currentTimeMillis()))
     }
 
+    fun suppressDownloadUrl(url: String) {
+        val now = System.currentTimeMillis()
+        suppressedDownloadUrls[url] = now
+        suppressedDownloadUrls.entries.removeAll { now - it.value > 10_000L }
+        if (entries.removeAll { it.type == HistoryType.SITE && it.url == url }) {
+            save()
+        }
+    }
+
     fun recordSite(url: String, title: String, executor: GeckoWebExecutor, incognito: Boolean) {
         if (incognito) return
+        val suppressedAt = suppressedDownloadUrls[url]
+        if (suppressedAt != null && System.currentTimeMillis() - suppressedAt <= 10_000L) return
         val uri = url.toHttpUriOrNull() ?: return
         val host = uri.host?.lowercase().orEmpty()
         if (host.isBlank()) return

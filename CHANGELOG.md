@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6
+
+- Show a bottom `"Download Started."` banner with a **See Downloads** action whenever a download begins.
+- Allow reloading the native home screen from the reload button once it has finished its initial load.
+- Prevent browsing history from saving download link URLs.
+
 ## 1.5
 
 - Add update-available prompts when a version is deprecated or no longer supported, with an **Update** button linking to GitHub Releases.

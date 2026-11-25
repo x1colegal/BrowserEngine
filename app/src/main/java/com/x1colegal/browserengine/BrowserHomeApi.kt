@@ -173,14 +173,24 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
 
     @Synchronized
     fun loadNativeHome(onBackoff: (Int) -> Unit = {}): HomeFeedData {
-        var session = getOrCreate()
-        var feed = try {
-            fetchHomeFeed(session)
-        } catch (error: ApiStatus) {
-            if (error.code != 467 && error.code != 401) throw error
-            clearSessionOnly()
-            session = getOrCreate()
-            fetchHomeFeed(session)
+        fun fetchWithSessionRefresh(): Pair<HomeCredentials, JSONObject> {
+            var session = getOrCreate()
+            val feed = try {
+                fetchHomeFeed(session)
+            } catch (error: ApiStatus) {
+                if (error.code != 467 && error.code != 401) throw error
+                clearSessionOnly()
+                session = getOrCreate()
+                fetchHomeFeed(session)
+            }
+            return session to feed
+        }
+
+        var (session, feed) = try {
+            fetchWithSessionRefresh()
+        } catch (error: IOException) {
+            if (error is ApiStatus) throw error
+            fetchWithSessionRefresh()
         }
         val backoff = feed.optInt("backoff", 0)
         if (backoff > 0) {
@@ -192,7 +202,9 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             } finally {
                 onBackoff(0)
             }
-            feed = fetchHomeFeed(session)
+            val refreshed = fetchWithSessionRefresh()
+            session = refreshed.first
+            feed = refreshed.second
         }
         val savedLocation = savedWeatherLocation()
         if (feed.optJSONObject("weather") == null && savedLocation.isNotBlank()) {

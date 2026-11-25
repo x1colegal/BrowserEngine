@@ -506,6 +506,7 @@ private class BrowserTabs(
         private set
     var homeBackoffSeconds by mutableIntStateOf(0)
         private set
+    private var hasLoadedNativeHome by mutableStateOf(false)
     var incognito by mutableStateOf(false)
         private set
     val savedWeatherLocation get() = homeClient.savedWeatherLocation()
@@ -593,12 +594,15 @@ private class BrowserTabs(
                         homeClient.loadNativeHome { seconds ->
                             homeBackoffSeconds = seconds
                         }
+                    }.onFailure {
+                        android.util.Log.e("BrowserHome", "Failed to load native home", it)
                     }.getOrNull()
                 }
                 if (!tabs.contains(tab) || !tab.nativeHome) return@launch
                 if (data != null) {
                     nativeHomeSections = data.sections
                     nativeHomeWeather = data.weather
+                    hasLoadedNativeHome = true
                 }
                 tab.finishHomeLoading()
             } finally {
@@ -634,8 +638,18 @@ private class BrowserTabs(
         updateWeather(saved, homeClient.savedWeatherLabel().takeIf { it.isNotBlank() })
     }
 
+    fun canReloadHome(tab: BrowserSession): Boolean =
+        !tab.nativeHome || (!tab.homeLoading && homeBackoffSeconds == 0 && hasLoadedNativeHome)
+
     fun reload(tab: BrowserSession) {
-        if (tab.nativeHome) openHome(tab) else tab.reload()
+        if (tab.nativeHome) {
+            if (!canReloadHome(tab)) return
+            nativeHomeSections = null
+            nativeHomeWeather = null
+            openHome(tab)
+        } else {
+            tab.reload()
+        }
     }
 
     fun setHomePresentation(presentation: HomePresentation) {
@@ -784,6 +798,7 @@ private class BrowserSession(
         private set
     private var attachedWebView: GeckoView? = null
     private var allowNewSession = false
+    private val pendingNavigationUrls = mutableListOf<String>()
     private var extensionReady = false
     private var pendingUrl: String? = null
     private var modeChangeUrl: String? = null
@@ -841,7 +856,10 @@ private class BrowserSession(
                 if (session === this@BrowserSession.session && !nativeHome && url?.toHttpUriOrNull() != null) {
                     val changed = this@BrowserSession.url != url
                     this@BrowserSession.url = url
-                    if (changed) attachedWebView?.postDelayed({ captureThumbnail() }, 600)
+                    if (changed) {
+                        pendingNavigationUrls.add(url)
+                        attachedWebView?.postDelayed({ captureThumbnail() }, 600)
+                    }
                 }
             }
 
@@ -864,6 +882,8 @@ private class BrowserSession(
                     }
                 } else {
                     allowNewSession = false
+                    if (!request.isRedirect) pendingNavigationUrls.clear()
+                    pendingNavigationUrls.add(request.uri)
                 }
                 val mime = BrowserNetwork.mediaMime(request.uri, null)
                 if (mime != null && request.uri.toHttpUriOrNull() != null) {
@@ -954,6 +974,7 @@ private class BrowserSession(
                 if (success && url.toHttpUriOrNull() != null) {
                     history.recordSite(url, title, executor, incognito)
                 }
+                if (success) pendingNavigationUrls.clear()
                 progress = 100
                 if (success) {
                     attachedWebView?.post { captureThumbnail() }
@@ -1011,6 +1032,9 @@ private class BrowserSession(
                     response.body?.let { runCatching { it.close() } }
                     media = MediaTarget(response.uri, mime)
                 } else if (response.statusCode in 200..299 && response.body != null) {
+                    history.suppressDownloadUrl(response.uri)
+                    pendingNavigationUrls.forEach(history::suppressDownloadUrl)
+                    pendingNavigationUrls.clear()
                     downloads.receive(response, incognito)
                 } else {
                     response.body?.let { runCatching { it.close() } }
@@ -1574,10 +1598,31 @@ private fun BrowserContent(
         }
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
+    DisposableEffect(tabs.downloads) {
+        tabs.downloads.onDownloadStarted = {
+            uiScope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                val result = snackbarHostState.showSnackbar(
+                    message = "Download Started.",
+                    actionLabel = "See Downloads",
+                    duration = SnackbarDuration.Short
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    screen = Screen.Downloads
+                }
+            }
+        }
+        onDispose { tabs.downloads.onDownloadStarted = null }
+    }
+
     BackHandler(!inPip && (browser.media != null || webFullscreen ||
         screen != Screen.Browser || browser.url.isNotEmpty()), onBack = back)
 
-    Scaffold(topBar = {
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
         when {
             inPip || webFullscreen || nativeFullscreen -> Unit
             screen != Screen.Browser -> PageBar(
@@ -1633,9 +1678,11 @@ private fun BrowserContent(
                         }
                     )
                     val edited = address.text.toString() != displayedUrl
+                    val reloadEnabled = edited || tabs.canReloadHome(browser)
                     NavigationIcon(
                         if (edited) Icons.AutoMirrored.Filled.ArrowForward else Icons.Default.Refresh,
-                        if (edited) "Go" else "Reload"
+                        if (edited) "Go" else "Reload",
+                        enabled = reloadEnabled
                     ) { if (edited) submit() else tabs.reload(browser) }
                 }
                 TabCounter(tabs.tabs.size) {
@@ -2194,8 +2241,13 @@ private fun CipherRow(cipher: TlsCipherSuite, tabs: BrowserTabs) {
 }
 
 @Composable
-private fun NavigationIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, action: () -> Unit) {
-    IconButton(onClick = action, modifier = Modifier.size(42.dp)) {
+private fun NavigationIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    enabled: Boolean = true,
+    action: () -> Unit
+) {
+    IconButton(onClick = action, enabled = enabled, modifier = Modifier.size(42.dp)) {
         Icon(icon, label, Modifier.size(21.dp))
     }
 }

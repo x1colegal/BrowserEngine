@@ -60,6 +60,7 @@ internal class BrowserDownloads private constructor(private val app: Context) {
     private val activeCancels = mutableMapOf<String, () -> Unit>()
     val entries = mutableStateListOf<BrowserDownload>()
     var permissionRequester: (((Boolean) -> Unit) -> Unit)? = null
+    var onDownloadStarted: (() -> Unit)? = null
 
     init {
         val records = runCatching { JSONArray(prefs.getString("entries", "[]")) }.getOrElse { JSONArray() }
@@ -135,6 +136,7 @@ internal class BrowserDownloads private constructor(private val app: Context) {
         )
         entries.add(0, entry)
         if (!incognito) save()
+        scope.launch { onDownloadStarted?.invoke() }
 
         val job = scope.launch {
             val outcome = withContext(Dispatchers.IO) {
