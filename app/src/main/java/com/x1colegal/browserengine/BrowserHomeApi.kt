@@ -90,18 +90,22 @@ internal object HomeImageLoader {
 
     fun cached(url: String): ImageBitmap? = cache.get(url)
 
-    fun fetch(executor: GeckoWebExecutor, url: String): ImageBitmap? {
+    fun fetch(executor: GeckoWebExecutor, url: String, sessionClient: HomeSessionClient? = null): ImageBitmap? {
         cache.get(url)?.let { return it }
         if (url.toHttpUriOrNull() == null) return null
         return runCatching {
-            val request = WebRequest.Builder(url).header("User-Agent", BrowserNetwork.agent(false)).build()
-            val pending = executor.fetch(request)
-            val response = try {
-                pending.poll(10_000)
-            } catch (_: TimeoutException) {
-                pending.withHandler(Handler(Looper.getMainLooper()))
-                    .accept({ it?.body?.let { s -> runCatching { s.close() } } }, {})
-                null
+            val response = if (url.startsWith("$API_BASE/api/img/") && sessionClient != null) {
+                sessionClient.fetchServerImageResponse(url)
+            } else {
+                val request = WebRequest.Builder(url).header("User-Agent", BrowserNetwork.agent(false)).build()
+                val pending = executor.fetch(request)
+                try {
+                    pending.poll(10_000)
+                } catch (_: TimeoutException) {
+                    pending.withHandler(Handler(Looper.getMainLooper()))
+                        .accept({ it?.body?.let { s -> runCatching { s.close() } } }, {})
+                    null
+                }
             }
             if (response == null || response.statusCode !in 200..299 || response.body == null) {
                 response?.body?.let { runCatching { it.close() } }
@@ -270,6 +274,40 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             .commit()
     }
 
+    fun fetchServerImageResponse(url: String): org.mozilla.geckoview.WebResponse? {
+        fun postImage(session: HomeCredentials): org.mozilla.geckoview.WebResponse? {
+            val bytes = JSONObject()
+                .put("id", session.id)
+                .put("token", session.token)
+                .put("clientVersion", BuildConfig.VERSION_NAME)
+                .toString()
+                .toByteArray(CP1252)
+            val request = WebRequest.Builder(url)
+                .method("POST")
+                .header("Accept", "image/*")
+                .header("ClientVersion", BuildConfig.VERSION_NAME)
+                .header("User-Agent", BrowserNetwork.agent(false))
+                .header("Content-Type", "application/json; charset=windows-1252")
+                .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
+                .build()
+            val pending = executor.fetch(request, GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS)
+            return try {
+                pending.poll(10_000)
+            } catch (_: TimeoutException) {
+                pending.withHandler(Handler(Looper.getMainLooper()))
+                    .accept({ it?.body?.let { s -> runCatching { s.close() } } }, {})
+                null
+            }
+        }
+        val first = postImage(getOrCreate()) ?: return null
+        if (first.statusCode == 467 || first.statusCode == 401) {
+            first.body?.let { runCatching { it.close() } }
+            clearSessionOnly()
+            return postImage(getOrCreate())
+        }
+        return first
+    }
+
     private fun fetchHomeFeed(session: HomeCredentials) = apiRequest(
         appContext,
         executor,
@@ -296,7 +334,8 @@ internal enum class ServerExperiment(val key: String) {
     ENHANCED_DOWNLOADS("enhanced_downloads"),
     CONNECTION_INFO_ICON("connection_info_icon"),
     WEATHER_LOADING_PLACEHOLDER("weather_loading_placeholder"),
-    TAB_THUMBNAILS("tab_thumbnails")
+    TAB_THUMBNAILS("tab_thumbnails"),
+    CONTEXT_MENU_ACTIONS("context_menu_actions")
 }
 
 internal object ServerExperiments {

@@ -493,7 +493,7 @@ private class BrowserTabs(
     val executor = GeckoWebExecutor(runtime)
     val downloads = BrowserDownloads.get(context)
     val history = BrowserHistory.get(context)
-    private val homeClient = HomeSessionClient(context, executor)
+    val homeClient = HomeSessionClient(context, executor)
     private val homeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val homeRequests = mutableMapOf<BrowserSession, kotlinx.coroutines.Job>()
     var nativeHomeSections by mutableStateOf<List<HomeSection>?>(null)
@@ -551,13 +551,14 @@ private class BrowserTabs(
         tabs.forEach { it.startInspector(extension) }
     }
 
-    fun newTab(url: String = "", popup: Boolean = false): BrowserSession {
+    fun newTab(url: String = "", popup: Boolean = false, parentTabId: Long? = null): BrowserSession {
         val home = !popup && (url.isEmpty() || url.substringBefore('#') == HOME_URL)
+        val tabId = nextTabId++
         val tab = BrowserSession(
-            nextTabId++, runtime, preferences, if (home) "" else url, popup, downloads, history, executor,
+            tabId, runtime, preferences, if (home) "" else url, popup, parentTabId, downloads, history, executor,
             incognito, { customCertificateWarning }
         ) {
-            newTab(popup = true).session
+            newTab(popup = true, parentTabId = tabId).session
         }
         tabs.add(tab)
         if (extensionReady) tab.startInspector(inspector)
@@ -674,7 +675,11 @@ private class BrowserTabs(
         homeRequests.remove(tab)?.cancel()
         tabs.removeAt(index)
         if (current === tab) {
-            if (tabs.isEmpty()) current = null else select(tabs[minOf(index, tabs.lastIndex)])
+            if (tabs.isEmpty()) current = null
+            else {
+                val parent = tab.openedFromTabId?.let { pid -> tabs.firstOrNull { it.id == pid } }
+                select(parent ?: tabs[minOf(index, tabs.lastIndex)])
+            }
         }
         tab.close()
     }
@@ -743,12 +748,15 @@ private class BrowserTabs(
     }
 }
 
+internal data class ContextMenuTarget(val imageUrl: String? = null, val linkUrl: String? = null)
+
 private class BrowserSession(
     val id: Long,
     private val runtime: GeckoRuntime,
     private val preferences: SharedPreferences,
     restore: String,
     popup: Boolean,
+    val openedFromTabId: Long? = null,
     private val downloads: BrowserDownloads,
     private val history: BrowserHistory,
     private val executor: GeckoWebExecutor,
@@ -779,8 +787,9 @@ private class BrowserSession(
     val displayUrl get() = media?.url ?: url
     var mediaReload by mutableIntStateOf(0)
         private set
+    val closeOnBack: Boolean = popup || openedFromTabId != null
     var mediaChoice by mutableStateOf<MediaTarget?>(null)
-    var downloadChoice by mutableStateOf<String?>(null)
+    var downloadChoice by mutableStateOf<ContextMenuTarget?>(null)
     var fullscreen by mutableStateOf(false)
         private set
     var webPlaying by mutableStateOf(false)
@@ -1051,8 +1060,15 @@ private class BrowserSession(
                 ) {
                     mediaChoice = MediaTarget(source, BrowserNetwork.mediaMime(source, null), element.baseUri)
                 } else {
-                    val link = element.linkUri?.takeIf { it.toHttpUriOrNull() != null } ?: source
-                    if (link != null) downloadChoice = link
+                    val imageUrl = source?.takeIf {
+                        element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE
+                    }
+                    val linkUrl = element.linkUri?.takeIf { it.toHttpUriOrNull() != null }
+                    if (imageUrl != null || linkUrl != null) {
+                        downloadChoice = ContextMenuTarget(imageUrl = imageUrl, linkUrl = linkUrl)
+                    } else if (source != null) {
+                        downloadChoice = ContextMenuTarget(linkUrl = source)
+                    }
                 }
             }
         }
@@ -1594,6 +1610,7 @@ private fun BrowserContent(
             screen != Screen.Browser -> screen = Screen.Browser
             media != null -> browser.media = null
             browser.canGoBack -> browser.session.goBack()
+            browser.closeOnBack && tabs.tabs.size > 1 -> tabs.closeTab(browser)
             else -> tabs.openHome(browser)
         }
     }
@@ -1601,11 +1618,11 @@ private fun BrowserContent(
     val snackbarHostState = remember { SnackbarHostState() }
     val uiScope = rememberCoroutineScope()
     DisposableEffect(tabs.downloads) {
-        tabs.downloads.onDownloadStarted = {
+        fun showDownloadBanner(message: String) {
             uiScope.launch {
                 snackbarHostState.currentSnackbarData?.dismiss()
                 val result = snackbarHostState.showSnackbar(
-                    message = "Download Started.",
+                    message = message,
                     actionLabel = "See Downloads",
                     duration = SnackbarDuration.Short
                 )
@@ -1614,11 +1631,16 @@ private fun BrowserContent(
                 }
             }
         }
-        onDispose { tabs.downloads.onDownloadStarted = null }
+        tabs.downloads.onDownloadStarted = { showDownloadBanner("Download Started.") }
+        tabs.downloads.onDownloadFinished = { showDownloadBanner("Download Finished.") }
+        onDispose {
+            tabs.downloads.onDownloadStarted = null
+            tabs.downloads.onDownloadFinished = null
+        }
     }
 
     BackHandler(!inPip && (browser.media != null || webFullscreen ||
-        screen != Screen.Browser || browser.url.isNotEmpty()), onBack = back)
+        screen != Screen.Browser || browser.url.isNotEmpty() || (browser.closeOnBack && tabs.tabs.size > 1)), onBack = back)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -1893,6 +1915,7 @@ private fun BrowserContent(
                             browser.homeLoading,
                             tabs.incognito,
                             tabs.executor,
+                            tabs.homeClient,
                             search = { query ->
                                 focus.clearFocus()
                                 val searchUrl = "https://www.google.com/search?q=${Uri.encode(query)}"
@@ -2018,19 +2041,108 @@ private fun BrowserContent(
             }
         )
     }
-    if (!inPip) browser.downloadChoice?.let { url ->
-        AlertDialog(
-            onDismissRequest = { browser.downloadChoice = null },
-            title = { Text("Download file?") },
-            text = { Text(url, maxLines = 3, overflow = TextOverflow.Ellipsis) },
-            confirmButton = {
-                TextButton(onClick = {
-                    browser.downloadChoice = null
-                    tabs.downloads.fetch(tabs.executor, url, browser.desktop, tabs.incognito)
-                }) { Text("Download") }
-            },
-            dismissButton = { TextButton(onClick = { browser.downloadChoice = null }) { Text("Cancel") } }
-        )
+    if (!inPip) browser.downloadChoice?.let { target ->
+        if (ServerExperiment.CONTEXT_MENU_ACTIONS.key in activeExperiments) {
+            val context = LocalContext.current
+            val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+            @OptIn(ExperimentalMaterial3Api::class)
+            ModalBottomSheet(
+                onDismissRequest = { browser.downloadChoice = null },
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ) {
+                val previewUrl = target.imageUrl ?: target.linkUrl.orEmpty()
+                Column(
+                    Modifier.fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .navigationBarsPadding()
+                        .padding(bottom = 16.dp)
+                ) {
+                    Text(
+                        text = previewUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                    )
+                    HorizontalDivider(Modifier.padding(bottom = 4.dp))
+                    @Composable
+                    fun ActionRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+                        ListItem(
+                            headlineContent = { Text(label) },
+                            leadingContent = { Icon(icon, contentDescription = null) },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+                        )
+                    }
+                    target.imageUrl?.let { img ->
+                        ActionRow(Icons.Default.Image, "Open image") {
+                            browser.downloadChoice = null
+                            browser.navigate(img)
+                        }
+                        ActionRow(Icons.Default.OpenInNew, "Open image in new tab") {
+                            browser.downloadChoice = null
+                            tabs.newTab(img, parentTabId = browser.id)
+                        }
+                        ActionRow(Icons.Default.Download, "Download image") {
+                            browser.downloadChoice = null
+                            tabs.downloads.fetch(tabs.executor, img, browser.desktop, tabs.incognito)
+                        }
+                        ActionRow(Icons.Default.ContentCopy, "Copy image") {
+                            browser.downloadChoice = null
+                            uiScope.launch {
+                                val uri = withContext(Dispatchers.IO) {
+                                    copyImageToCacheUri(context, tabs.executor, img)
+                                }
+                                if (uri != null) {
+                                    clipboard?.setPrimaryClip(android.content.ClipData.newUri(context.contentResolver, "Image", uri))
+                                    android.widget.Toast.makeText(context, "Image copied", android.widget.Toast.LENGTH_SHORT).show()
+                                } else {
+                                    android.widget.Toast.makeText(context, "Could not copy image", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                        ActionRow(Icons.Default.Link, "Copy image link") {
+                            browser.downloadChoice = null
+                            clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Image URL", img))
+                            android.widget.Toast.makeText(context, "Link copied", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    if (target.imageUrl != null && target.linkUrl != null) {
+                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    }
+                    target.linkUrl?.let { link ->
+                        ActionRow(Icons.Default.OpenInNew, "Open link in new tab") {
+                            browser.downloadChoice = null
+                            tabs.newTab(link, parentTabId = browser.id)
+                        }
+                        ActionRow(Icons.Default.Download, "Download link") {
+                            browser.downloadChoice = null
+                            tabs.downloads.fetch(tabs.executor, link, browser.desktop, tabs.incognito)
+                        }
+                        ActionRow(Icons.Default.Link, "Copy link") {
+                            browser.downloadChoice = null
+                            clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("URL", link))
+                            android.widget.Toast.makeText(context, "Link copied", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        } else {
+            val fallbackUrl = target.linkUrl ?: target.imageUrl ?: return@let
+            AlertDialog(
+                onDismissRequest = { browser.downloadChoice = null },
+                title = { Text("Download file?") },
+                text = { Text(fallbackUrl, maxLines = 3, overflow = TextOverflow.Ellipsis) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        browser.downloadChoice = null
+                        tabs.downloads.fetch(tabs.executor, fallbackUrl, browser.desktop, tabs.incognito)
+                    }) { Text("Download") }
+                },
+                dismissButton = { TextButton(onClick = { browser.downloadChoice = null }) { Text("Cancel") } }
+            )
+        }
     }
 }
 
@@ -2701,3 +2813,29 @@ private fun CookieSettings(tabs: BrowserTabs) {
         )
     }
 }
+
+private fun copyImageToCacheUri(context: Context, executor: GeckoWebExecutor, url: String): Uri? = runCatching {
+    val request = org.mozilla.geckoview.WebRequest.Builder(url).header("User-Agent", BrowserNetwork.agent(false)).build()
+    val pending = executor.fetch(request)
+    val response = pending.poll(10_000) ?: return@runCatching null
+    if (response.statusCode !in 200..299 || response.body == null) {
+        response.body?.let { runCatching { it.close() } }
+        return@runCatching null
+    }
+    val bytes = response.body!!.use { input ->
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            if (out.size() + n > 5 * 1024 * 1024) return@use null
+            out.write(buf, 0, n)
+        }
+        out.toByteArray()
+    } ?: return@runCatching null
+    val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@runCatching null
+    val dir = context.cacheDir.resolve("clipboard").apply { mkdirs() }
+    val file = dir.resolve("copied_image.png")
+    file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+    androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.downloads", file)
+}.getOrNull()

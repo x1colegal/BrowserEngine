@@ -154,6 +154,7 @@ internal fun NativeHomeScreen(
     loading: Boolean,
     incognito: Boolean,
     executor: GeckoWebExecutor,
+    sessionClient: HomeSessionClient,
     search: (String) -> Unit,
     navigate: (String) -> Unit,
     searchLocations: suspend (String) -> List<WeatherLocationResult>,
@@ -289,7 +290,7 @@ internal fun NativeHomeScreen(
                     key = { index, _ -> "story:${section.title}:$index" },
                     contentType = { _, entry -> if (entry.url == null) "plain story" else "linked story" }
                 ) { _, entry ->
-                    HomeStoryCard(entry, executor, navigate)
+                    HomeStoryCard(entry, executor, sessionClient, navigate)
                 }
             }
         }
@@ -493,8 +494,8 @@ private fun WeatherStat(label: String, value: String) {
 }
 
 @Composable
-private fun HomeStoryCard(entry: HomeEntry, executor: GeckoWebExecutor, navigate: (String) -> Unit) {
-    val thumbnail = rememberRemoteImage(entry.imageUrl, executor)
+private fun HomeStoryCard(entry: HomeEntry, executor: GeckoWebExecutor, sessionClient: HomeSessionClient, navigate: (String) -> Unit) {
+    val (thumbnail, imageLoading) = rememberRemoteImageState(entry.imageUrl, executor, sessionClient)
     val content: @Composable () -> Unit = {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -512,7 +513,10 @@ private fun HomeStoryCard(entry: HomeEntry, executor: GeckoWebExecutor, navigate
                 }
             }
             if (entry.imageUrl != null) {
-                Box(Modifier.size(64.dp).clip(MaterialTheme.shapes.small)) {
+                Box(
+                    Modifier.size(64.dp).clip(MaterialTheme.shapes.small),
+                    contentAlignment = Alignment.Center
+                ) {
                     if (thumbnail != null) {
                         Image(
                             bitmap = thumbnail,
@@ -520,6 +524,8 @@ private fun HomeStoryCard(entry: HomeEntry, executor: GeckoWebExecutor, navigate
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
+                    } else if (imageLoading) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     }
                 }
             }
@@ -532,13 +538,23 @@ private fun HomeStoryCard(entry: HomeEntry, executor: GeckoWebExecutor, navigate
 }
 
 @Composable
-private fun rememberRemoteImage(url: String?, executor: GeckoWebExecutor): ImageBitmap? {
-    if (url == null) return null
+private fun rememberRemoteImageState(
+    url: String?,
+    executor: GeckoWebExecutor,
+    sessionClient: HomeSessionClient
+): Pair<ImageBitmap?, Boolean> {
+    if (url == null) return null to false
     var image by remember(url) { mutableStateOf(HomeImageLoader.cached(url)) }
+    var loading by remember(url) { mutableStateOf(image == null) }
     LaunchedEffect(url) {
         if (image == null) {
-            image = withContext(Dispatchers.IO) { HomeImageLoader.fetch(executor, url) }
+            loading = true
+            try {
+                image = withContext(Dispatchers.IO) { HomeImageLoader.fetch(executor, url, sessionClient) }
+            } finally {
+                loading = false
+            }
         }
     }
-    return image
+    return image to loading
 }

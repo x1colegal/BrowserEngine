@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7
+
+- Proxy and cache native home news images through the BrowserEngine server.
+- Close tabs opened from links/popups on Back and return to the previous tab instead of opening Home.
+- Add experimental long-press image and link context menu actions (`context_menu_actions`), including open, open in new tab, download, and copy image/link.
+- Fix the User-Agent token from `EngineBrowser` to `BrowserEngine`.
+- Show a bottom `"Download Finished."` banner with a **See Downloads** action when a download completes.
+
 ## 1.6
 
 - Show a bottom `"Download Started."` banner with a **See Downloads** action whenever a download begins.

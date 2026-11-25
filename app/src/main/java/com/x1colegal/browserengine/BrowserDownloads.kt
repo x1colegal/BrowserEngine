@@ -61,6 +61,7 @@ internal class BrowserDownloads private constructor(private val app: Context) {
     val entries = mutableStateListOf<BrowserDownload>()
     var permissionRequester: (((Boolean) -> Unit) -> Unit)? = null
     var onDownloadStarted: (() -> Unit)? = null
+    var onDownloadFinished: (() -> Unit)? = null
 
     init {
         val records = runCatching { JSONArray(prefs.getString("entries", "[]")) }.getOrElse { JSONArray() }
@@ -168,7 +169,9 @@ internal class BrowserDownloads private constructor(private val app: Context) {
                 )
                 if (!incognito) save()
             }
-            if (!outcome.success && isActive) {
+            if (outcome.success && isActive) {
+                onDownloadFinished?.invoke()
+            } else if (!outcome.success && isActive) {
                 Toast.makeText(app, "Download failed", Toast.LENGTH_SHORT).show()
             }
         }

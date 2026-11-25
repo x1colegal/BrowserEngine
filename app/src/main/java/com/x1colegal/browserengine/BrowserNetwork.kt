@@ -11,7 +11,7 @@ internal object BrowserNetwork {
         } else {
             mobileAgent
         }
-        return "$agent EngineBrowser/${BuildConfig.VERSION_NAME}"
+        return "$agent BrowserEngine/${BuildConfig.VERSION_NAME}"
     }
 
     fun mediaMime(url: String, contentType: String?): String? {
