@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.11
+
+- Update feature flag API paths.
+
 ## 1.10
 
 - Fix native home feed failing with an error when reopened or switched while a previous wait timer was still active.

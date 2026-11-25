@@ -444,7 +444,7 @@ internal object ServerExperiments {
         }
         val executor = apiExecutor(context)
         val token = settings.getString("permanent_token", null) ?: run {
-            val generated = apiRequest(context, executor, "/srvr/experiments/gen/token").getString("token")
+            val generated = apiRequest(context, executor, "/server/experiments/gen/token").getString("token")
             if (!generated.matches(Regex("[a-f0-9]{64}"))) throw IOException("Invalid experiment token")
             if (!settings.edit().putString("permanent_token", generated).commit()) {
                 throw IOException("Could not save experiment token")
@@ -454,11 +454,11 @@ internal object ServerExperiments {
         val request = JSONObject().put("token", token).put(
             "supportedExperiments", org.json.JSONArray(ServerExperiment.entries.map { it.key })
         )
-        var response = apiRequest(context, executor, "/srvr/experiments/get", request)
+        var response = apiRequest(context, executor, "/server/experiments/get", request)
         val backoff = response.optInt("backoff", 0)
         if (backoff > 0) {
             Thread.sleep(backoff * 1000L)
-            response = apiRequest(context, executor, "/srvr/experiments/get", request)
+            response = apiRequest(context, executor, "/server/experiments/get", request)
         }
         val flags = response.getJSONObject("experiments")
         val enabled = ServerExperiment.entries.filter { flags.opt(it.key) == true }.map { it.key }.toSet()
