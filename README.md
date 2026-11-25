@@ -3,7 +3,7 @@
 BrowserEngine is an Android browser with a bundled GeckoView engine and a Jetpack Compose Material Design interface.
 
 - **`modern` flavor (Android 8.0+ / API 26+)**: tracks the latest GeckoView release (`161+`).
-- **`legacy` flavor (Android 5.0–7.1 / API 21–25)**: uses GeckoView `143.0.20251003115653`, the final GeckoView line supporting Android 5–7 and 32-bit `x86`.
+- **`legacy` flavor (Android 5.0–7.1 / API 21–25)**: uses GeckoView `143.0.20251003115653`, the final GeckoView line supporting Android 5–7.
 
 ## Browsing
 
