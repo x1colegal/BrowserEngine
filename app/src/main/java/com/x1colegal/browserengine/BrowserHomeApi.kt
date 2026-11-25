@@ -177,6 +177,24 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
     }
 
     suspend fun loadNativeHome(onBackoff: (Int) -> Unit = {}): HomeFeedData {
+        suspend fun waitRemainingBackoff() {
+            val untilMs = preferences.getLong("backoff_until_ms", 0L)
+            val remainingSec = ((untilMs - System.currentTimeMillis() + 999L) / 1000L).toInt()
+            if (remainingSec > 0) {
+                try {
+                    for (remaining in remainingSec downTo 1) {
+                        onBackoff(remaining)
+                        kotlinx.coroutines.delay(1000L)
+                    }
+                } finally {
+                    onBackoff(0)
+                }
+            }
+            if (untilMs > 0L) {
+                preferences.edit().remove("backoff_until_ms").apply()
+            }
+        }
+
         fun fetchWithSessionRefresh(): Pair<HomeCredentials, JSONObject> {
             var session = getOrCreate()
             val feed = try {
@@ -190,14 +208,31 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             return session to feed
         }
 
+        waitRemainingBackoff()
+
         var (session, feed) = try {
             fetchWithSessionRefresh()
+        } catch (error: ApiStatus) {
+            if (error.code != 471) throw error
+            var resolved: Pair<HomeCredentials, JSONObject>? = null
+            for (attempt in 1..8) {
+                onBackoff(1)
+                kotlinx.coroutines.delay(1000L)
+                try {
+                    resolved = fetchWithSessionRefresh()
+                    break
+                } catch (retryError: ApiStatus) {
+                    if (retryError.code != 471 || attempt == 8) throw retryError
+                }
+            }
+            onBackoff(0)
+            resolved!!
         } catch (error: IOException) {
-            if (error is ApiStatus) throw error
             fetchWithSessionRefresh()
         }
         val backoff = feed.optInt("backoff", 0)
         if (backoff > 0) {
+            preferences.edit().putLong("backoff_until_ms", System.currentTimeMillis() + backoff * 1000L).apply()
             try {
                 for (remaining in backoff downTo 1) {
                     onBackoff(remaining)
@@ -206,6 +241,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             } finally {
                 onBackoff(0)
             }
+            preferences.edit().remove("backoff_until_ms").apply()
             val refreshed = fetchWithSessionRefresh()
             session = refreshed.first
             feed = refreshed.second

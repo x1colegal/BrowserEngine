@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10
+
+- Fix native home feed failing with an error when reopened or switched while a previous wait timer was still active.
+
 ## 1.9
 
 - Fix tapping an address-bar history suggestion after closing the keyboard being ignored instead of opening the page.
