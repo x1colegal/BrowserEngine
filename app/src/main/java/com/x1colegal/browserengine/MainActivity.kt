@@ -176,7 +176,21 @@ class MainActivity : ComponentActivity() {
             val command = PipCommand.entries.firstOrNull { it.name == intent.getStringExtra(PIP_COMMAND) } ?: return
             val tab = browser.current ?: return
             if (tab.media != null) nativePlayer?.let { command.run(it) }
-            else tab.webMediaSession?.let { command.run(it, tab.webFeatures) }
+            else {
+                when (command) {
+                    PipCommand.PLAY -> {
+                        tab.sendWebPipAction("play", true)
+                        tab.webMediaSession?.play()
+                        updatePipControls()
+                    }
+                    PipCommand.PAUSE -> {
+                        tab.sendWebPipAction("pause", false)
+                        tab.webMediaSession?.pause()
+                        updatePipControls()
+                    }
+                    else -> tab.webMediaSession?.let { command.run(it, tab.webFeatures) }
+                }
+            }
         }
     }
 
@@ -280,11 +294,21 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         browser.current?.captureThumbnail()
         super.onPause()
+        if (Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode) {
+            browser.current?.session?.setActive(true)
+        }
     }
 
     override fun onStop() {
         foregroundExperimentCheck?.cancel()
         foregroundExperimentCheck = null
+        if (!isInPictureInPictureMode && !isChangingConfigurations) {
+            nativePlayer?.pause()
+            browser.current?.let { tab ->
+                tab.sendWebPipAction("pause", false)
+                tab.webMediaSession?.pause()
+            }
+        }
         super.onStop()
     }
 
@@ -326,6 +350,7 @@ class MainActivity : ComponentActivity() {
     private fun enterVideoPip(aspect: Rational): Boolean {
         if (Build.VERSION.SDK_INT < 26 || !supportsPip || isInPictureInPictureMode) return false
         pipAspect = aspect
+        browser.current?.updateWebPip(supportsPip, true)
         return runCatching { enterPictureInPictureMode(currentPipParams()) }.getOrDefault(false)
     }
 
@@ -345,12 +370,14 @@ class MainActivity : ComponentActivity() {
         val tab = browser.current
         val player = nativePlayer.takeIf { tab?.media != null }
         if (player != null) return pipParams(this, pipAspect, player.playWhenReady) { it.available(player) }
-        val features = if (tab?.webMediaSession != null) tab.webFeatures else MediaSession.Feature.NONE
+        val features = if (tab?.webMediaSession != null) tab.webFeatures
+        else (MediaSession.Feature.PLAY or MediaSession.Feature.PAUSE)
         return pipParams(this, pipAspect, tab?.webPlaying == true) { it.available(features) }
     }
 
     private fun updatePipControls() {
         if (Build.VERSION.SDK_INT >= 26 && pictureInPicture && !isDestroyed && !isFinishing) {
+            syncAndroidPipMediaSession(true)
             setPictureInPictureParams(currentPipParams())
         }
     }
@@ -367,12 +394,83 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (Build.VERSION.SDK_INT < 31) enterCurrentVideoPip()
+        if (!enterCurrentVideoPip() && Build.VERSION.SDK_INT >= 26 && supportsPip && !isInPictureInPictureMode) {
+            val current = browser.current
+            if (current != null && !current.nativeHome && current.webPlaying) {
+                enterVideoPip(current.fullscreenAspect)
+            }
+        }
+    }
+
+    private var pipAndroidMediaSession: android.media.session.MediaSession? = null
+
+    private fun syncAndroidPipMediaSession(inPip: Boolean) {
+        if (!inPip) {
+            pipAndroidMediaSession?.isActive = false
+            pipAndroidMediaSession?.release()
+            pipAndroidMediaSession = null
+            return
+        }
+        val tab = browser.current ?: return
+        val ms = pipAndroidMediaSession ?: android.media.session.MediaSession(this, "BrowserEngineWebPip").apply {
+            setCallback(object : android.media.session.MediaSession.Callback() {
+                override fun onPlay() {
+                    browser.current?.let { t ->
+                        if (t.media != null) nativePlayer?.play()
+                        else {
+                            t.sendWebPipAction("play", true)
+                            t.webMediaSession?.play()
+                        }
+                    }
+                    updatePipControls()
+                }
+                override fun onPause() {
+                    browser.current?.let { t ->
+                        if (t.media != null) nativePlayer?.pause()
+                        else {
+                            t.sendWebPipAction("pause", false)
+                            t.webMediaSession?.pause()
+                        }
+                    }
+                    updatePipControls()
+                }
+            })
+            isActive = true
+        }.also { pipAndroidMediaSession = it }
+        val playing = if (tab.media != null) (nativePlayer?.isPlaying == true || nativePlayer?.playWhenReady == true) else tab.webPlaying
+        val state = android.media.session.PlaybackState.Builder()
+            .setActions(
+                android.media.session.PlaybackState.ACTION_PLAY or
+                    android.media.session.PlaybackState.ACTION_PAUSE or
+                    android.media.session.PlaybackState.ACTION_PLAY_PAUSE
+            )
+            .setState(
+                if (playing) android.media.session.PlaybackState.STATE_PLAYING else android.media.session.PlaybackState.STATE_PAUSED,
+                0L,
+                1f
+            )
+            .build()
+        ms.setPlaybackState(state)
     }
 
     override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(inPip, newConfig)
         pictureInPicture = inPip
+        val tab = browser.current
+        tab?.updateWebPip(supportsPip, inPip)
+        val session = tab?.session
+        if (inPip) {
+            session?.setActive(true)
+            session?.setFocused(true)
+            session?.setPriorityHint(org.mozilla.geckoview.GeckoSession.PRIORITY_HIGH)
+            syncAndroidPipMediaSession(true)
+            updatePipControls()
+        } else {
+            syncAndroidPipMediaSession(false)
+            session?.setActive(true)
+            session?.setFocused(true)
+            session?.setPriorityHint(org.mozilla.geckoview.GeckoSession.PRIORITY_DEFAULT)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -469,7 +567,10 @@ internal object BrowserRuntime {
                 ))
                 .build())
             .build()
-        return GeckoRuntime.create(app, settings).also { runtime = it }
+        return GeckoRuntime.create(app, settings).also {
+            it.setAutocompleteStorageDelegate(PasswordManager.createStorageDelegate(app))
+            runtime = it
+        }
     }
 }
 
@@ -787,9 +888,16 @@ private class BrowserSession(
         private set
     private var pageCertificate by mutableStateOf<GeckoSession.ProgressDelegate.SecurityInformation?>(null)
     private var rejectedCertificate by mutableStateOf<Pair<String, java.security.cert.X509Certificate>?>(null)
+    private var lastAcceptedCertificate by mutableStateOf<Pair<String, java.security.cert.X509Certificate>?>(null)
+    private fun String.normalizedHost(): String = trim().removePrefix("[").removeSuffix("]").lowercase()
     val certificateRejected get() = rejectedCertificate?.first == displayUrl.substringBefore('#')
-    val certificate get() = if (certificateRejected) rejectedCertificate?.second
-        else pageCertificate?.takeIf { it.host.equals(displayUrl.toHttpUriOrNull()?.host, true) }?.certificate
+    val certificate get(): java.security.cert.X509Certificate? {
+        if (certificateRejected) return rejectedCertificate?.second
+        val currentHost = displayUrl.toHttpUriOrNull()?.host?.normalizedHost().orEmpty()
+        if (currentHost.isEmpty()) return null
+        return pageCertificate?.takeIf { it.host.orEmpty().normalizedHost() == currentHost }?.certificate
+            ?: lastAcceptedCertificate?.takeIf { it.first == currentHost }?.second
+    }
     var failure by mutableStateOf<String?>(null)
         private set
     var media by mutableStateOf<MediaTarget?>(null)
@@ -812,8 +920,10 @@ private class BrowserSession(
     var videoPort by mutableStateOf<WebExtension.Port?>(null)
         private set
     var webPipRequested by mutableStateOf(false)
+    var webPipUrl by mutableStateOf<Pair<String, Long>?>(null)
     var thumbnail by mutableStateOf<Bitmap?>(null)
         private set
+    var webPipReturnTick by mutableIntStateOf(0)
     private var attachedWebView: GeckoView? = null
     private var allowNewSession = false
     private val pendingNavigationUrls = mutableListOf<String>()
@@ -866,6 +976,71 @@ private class BrowserSession(
     }
 
     private fun configureSession() {
+        session.promptDelegate = object : GeckoSession.PromptDelegate {
+            override fun onAuthPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.AuthPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                val host = url.toHttpUriOrNull()?.host ?: "site"
+                val message = prompt.message.orEmpty()
+                val key = host
+                pendingHttpAuth = PendingHttpAuth(
+                    key = key,
+                    host = host,
+                    message = message,
+                    initialUser = prompt.authOptions.username.orEmpty(),
+                    initialPass = prompt.authOptions.password.orEmpty(),
+                    onConfirm = { user, pass ->
+                        result.complete(prompt.confirm(user, pass))
+                    },
+                    onDismiss = {
+                        result.complete(prompt.dismiss())
+                    }
+                )
+                return result
+            }
+
+            override fun onChoicePrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.ChoicePrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                val flat = buildList {
+                    fun addChoices(arr: Array<out GeckoSession.PromptDelegate.ChoicePrompt.Choice>?, indent: Boolean = false) {
+                        if (arr == null) return
+                        for (c in arr) {
+                            when {
+                                c.separator -> add(ChoiceOption("", "", false, true, isSeparator = true))
+                                !c.items.isNullOrEmpty() -> {
+                                    add(ChoiceOption("", c.label.orEmpty(), false, true, isGroupHeader = true))
+                                    addChoices(c.items, indent = true)
+                                }
+                                else -> add(
+                                    ChoiceOption(
+                                        id = c.id.orEmpty(),
+                                        label = (if (indent) "  " else "") + c.label.orEmpty(),
+                                        selected = c.selected,
+                                        disabled = c.disabled
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    addChoices(prompt.choices)
+                }
+                val multiple = prompt.type == GeckoSession.PromptDelegate.ChoicePrompt.Type.MULTIPLE
+                pendingChoicePrompt = PendingChoicePrompt(
+                    title = prompt.title?.takeIf { it.isNotBlank() } ?: prompt.message?.takeIf { it.isNotBlank() } ?: "Select an option",
+                    multiple = multiple,
+                    options = flat,
+                    onConfirmSingle = { id -> result.complete(prompt.confirm(id)) },
+                    onConfirmMultiple = { ids -> result.complete(prompt.confirm(ids)) },
+                    onDismiss = { result.complete(prompt.dismiss()) }
+                )
+                return result
+            }
+        }
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
             override fun onLocationChange(
                 session: GeckoSession, url: String?, perms: List<GeckoSession.PermissionDelegate.ContentPermission>,
@@ -874,6 +1049,7 @@ private class BrowserSession(
                 if (session === this@BrowserSession.session && !nativeHome && url?.toHttpUriOrNull() != null) {
                     val changed = this@BrowserSession.url != url
                     this@BrowserSession.url = url
+                    PasswordManager.activeSuggestions = emptyList()
                     if (changed) {
                         pendingNavigationUrls.add(url)
                         attachedWebView?.postDelayed({ captureThumbnail() }, 600)
@@ -924,6 +1100,10 @@ private class BrowserSession(
                 rejectedCertificate = uri
                     ?.takeIf { it.toHttpUriOrNull()?.scheme.equals("https", true) }
                     ?.let { failedUrl -> error.certificate?.let { failedUrl.substringBefore('#') to it } }
+                val certHost = uri?.toHttpUriOrNull()?.host?.normalizedHost().orEmpty()
+                if (certHost.isNotEmpty() && error.certificate != null) {
+                    lastAcceptedCertificate = certHost to error.certificate!!
+                }
                 finishHomeLoading()
                 security = null
                 return when (error.code) {
@@ -959,6 +1139,7 @@ private class BrowserSession(
                     modePageStarted = true
                     traceMode("pageStart host=${url.toHttpUriOrNull()?.host}")
                     this@BrowserSession.url = url
+                    PasswordManager.activeSuggestions = emptyList()
                     title = ""
                     thumbnail = null
                     fullscreen = false
@@ -1123,6 +1304,36 @@ private class BrowserSession(
                         override fun onPortMessage(message: Any, port: WebExtension.Port) {
                             if (videoPort !== port) return
                             if (message == "pip") webPipRequested = true
+                            else if (message is JSONObject) {
+                                when (message.optString("action")) {
+                                    "pip_url" -> {
+                                        val u = message.optString("url")
+                                        if (u.isNotBlank()) webPipUrl = u to message.optLong("positionMs", 0L)
+                                    }
+                                    "pip_time" -> {
+                                        val sec = message.optDouble("currentTime", -1.0)
+                                        if (sec >= 0.0) webTimeSec = sec
+                                    }
+                                    "login_submit" -> {
+                                        val origin = message.optString("origin")
+                                        val user = message.optString("username")
+                                        val pass = message.optString("password")
+                                        if (origin.isNotBlank() && pass.isNotBlank()) {
+                                            PasswordManager.pendingSubmit = SavedLogin(origin, user, pass)
+                                        }
+                                    }
+                                    "login_focus" -> {
+                                        val domain = message.optString("domain")
+                                        if (domain.isNotBlank()) {
+                                            PasswordManager.pendingFocusDomain = domain
+                                        }
+                                    }
+                                    "login_blur" -> {
+                                        PasswordManager.pendingFocusDomain = null
+                                        PasswordManager.activeSuggestions = emptyList()
+                                    }
+                                }
+                            }
                         }
 
                         override fun onDisconnect(port: WebExtension.Port) {
@@ -1142,6 +1353,37 @@ private class BrowserSession(
 
     fun updateWebPip(supported: Boolean, inPip: Boolean) {
         videoPort?.postMessage(JSONObject().put("supported", supported).put("inPip", inPip))
+    }
+
+    var webTimeSec: Double = 0.0
+
+    fun getInspectorExtension(): WebExtension? = inspector
+    fun getGeckoRuntime(): GeckoRuntime = runtime
+
+    fun sendWebPipPlaceholder(active: Boolean, seekSec: Double = 0.0, resume: Boolean = false) {
+        videoPort?.postMessage(
+            JSONObject()
+                .put("action", "pip_placeholder")
+                .put("active", active)
+                .put("seekSec", seekSec)
+                .put("resume", resume)
+        )
+    }
+
+    fun sendWebPipAction(action: String, playing: Boolean) {
+        webPlaying = playing
+        videoPort?.postMessage(JSONObject().put("action", action))
+    }
+
+    fun releaseForPip() {
+        attachedWebView?.releaseSession()
+    }
+
+    fun reattachAfterPip() {
+        attachedWebView?.let { view ->
+            if (view.session !== session) view.setSession(session)
+        }
+        webPipReturnTick++
     }
 
     fun detachWebView(view: GeckoView) {
@@ -1444,6 +1686,136 @@ private fun BrowserScreen(
     var tabsVisible by rememberSaveable { mutableStateOf(false) }
     val browser = tabs.current
     var restartPrompt by remember { mutableStateOf(false) }
+    pendingHttpAuth?.let { auth ->
+        val authContext = LocalContext.current.applicationContext
+        val prefs = remember(auth.key) { AppPrefs.get(authContext, "http_auth") }
+        var userInput by remember(auth) { mutableStateOf(prefs.getString("${auth.key}_user", null) ?: auth.initialUser) }
+        var passInput by remember(auth) { mutableStateOf(prefs.getString("${auth.key}_pass", null) ?: auth.initialPass) }
+        var showPass by remember(auth) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = {
+                pendingHttpAuth = null
+                auth.onDismiss()
+            },
+            title = { Text("Sign in to ${auth.host}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (auth.message.isNotBlank()) {
+                        Text(auth.message, style = MaterialTheme.typography.bodySmall)
+                    }
+                    OutlinedTextField(
+                        value = userInput,
+                        onValueChange = { userInput = it },
+                        label = { Text("Username") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = passInput,
+                        onValueChange = { passInput = it },
+                        label = { Text("Password") },
+                        visualTransformation = if (showPass) androidx.compose.ui.text.input.VisualTransformation.None
+                        else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showPass = !showPass }) {
+                                Icon(
+                                    if (showPass) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (showPass) "Hide password" else "Show password"
+                                )
+                            }
+                        },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    prefs.edit()
+                        .putString("${auth.key}_user", userInput)
+                        .putString("${auth.key}_pass", passInput)
+                        .apply()
+                    pendingHttpAuth = null
+                    auth.onConfirm(userInput, passInput)
+                }) { Text("Sign in") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    pendingHttpAuth = null
+                    auth.onDismiss()
+                }) { Text("Cancel") }
+            }
+        )
+    }
+    pendingChoicePrompt?.let { choice ->
+        var selectedIds by remember(choice) {
+            mutableStateOf(choice.options.filter { it.selected && it.id.isNotEmpty() }.map { it.id }.toSet())
+        }
+        AlertDialog(
+            onDismissRequest = {
+                pendingChoicePrompt = null
+                choice.onDismiss()
+            },
+            title = { Text(choice.title) },
+            text = {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
+                    items(choice.options.size) { idx ->
+                        val opt = choice.options[idx]
+                        when {
+                            opt.isSeparator -> HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                            opt.isGroupHeader -> Text(
+                                opt.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
+                            )
+                            else -> {
+                                val checked = opt.id in selectedIds
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !opt.disabled) {
+                                            if (choice.multiple) {
+                                                selectedIds = if (checked) selectedIds - opt.id else selectedIds + opt.id
+                                            } else {
+                                                pendingChoicePrompt = null
+                                                choice.onConfirmSingle(opt.id)
+                                            }
+                                        }
+                                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (choice.multiple) {
+                                        Checkbox(checked = checked, onCheckedChange = null, enabled = !opt.disabled)
+                                    } else {
+                                        RadioButton(selected = opt.selected, onClick = null, enabled = !opt.disabled)
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        opt.label,
+                                        color = if (opt.disabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                if (choice.multiple) {
+                    TextButton(onClick = {
+                        pendingChoicePrompt = null
+                        choice.onConfirmMultiple(selectedIds.toTypedArray())
+                    }) { Text("OK") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    pendingChoicePrompt = null
+                    choice.onDismiss()
+                }) { Text("Cancel") }
+            }
+        )
+    }
     LaunchedEffect(pendingExperiments, inPip, discontinued) {
         if (!discontinued && !inPip && pendingExperiments.isNotEmpty() &&
             !experimentPreferences.getBoolean(ServerExperiments.PROMPTED, false)
@@ -1599,10 +1971,17 @@ private fun BrowserContent(
     }
     val webFullscreen = browser.fullscreen && screen == Screen.Browser && media == null
     LaunchedEffect(screen, browser) {
+        PasswordManager.activeSuggestions = emptyList()
         if (screen != Screen.Browser) browser.captureThumbnail()
     }
-    LaunchedEffect(browser, browser.videoPort) {
-        browser.updateWebPip(false, false)
+    LaunchedEffect(browser, browser.videoPort, supportsPip, inPip) {
+        browser.updateWebPip(supportsPip, inPip)
+    }
+    LaunchedEffect(browser.webPipRequested) {
+        if (browser.webPipRequested) {
+            browser.webPipRequested = false
+            enterPip(browser.fullscreenAspect)
+        }
     }
     var nativeFullscreen by remember(browser, media) { mutableStateOf(false) }
     val immersiveVideo = (nativeFullscreen || webFullscreen) && !inPip
@@ -1626,6 +2005,32 @@ private fun BrowserContent(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val uiScope = rememberCoroutineScope()
+    val pwdContext = LocalContext.current.applicationContext
+    LaunchedEffect(PasswordManager.pendingSubmit) {
+        val submitted = PasswordManager.pendingSubmit ?: return@LaunchedEffect
+        PasswordManager.pendingSubmit = null
+        PasswordManager.onFormLoginSubmitted(pwdContext, submitted.origin, submitted.username, submitted.password)
+    }
+    LaunchedEffect(PasswordManager.pendingFocusDomain) {
+        val domain = PasswordManager.pendingFocusDomain ?: return@LaunchedEffect
+        PasswordManager.pendingFocusDomain = null
+        PasswordManager.activeSuggestions = PasswordManager.listForDomain(pwdContext, domain)
+    }
+    LaunchedEffect(PasswordManager.pendingSave) {
+        val pending = PasswordManager.pendingSave ?: return@LaunchedEffect
+        snackbarHostState.currentSnackbarData?.dismiss()
+        val label = pending.login.username.ifBlank { pending.login.origin }
+        val res = snackbarHostState.showSnackbar(
+            message = if (pending.isUpdate) "Update password for $label?" else "Save password for $label?",
+            actionLabel = if (pending.isUpdate) "Update" else "Save",
+            withDismissAction = true,
+            duration = SnackbarDuration.Long
+        )
+        if (res == SnackbarResult.ActionPerformed) {
+            PasswordManager.saveOrUpdate(pwdContext, pending.login)
+        }
+        PasswordManager.pendingSave = null
+    }
     DisposableEffect(tabs.downloads) {
         fun showDownloadBanner(message: String) {
             uiScope.launch {
@@ -1651,8 +2056,8 @@ private fun BrowserContent(
     BackHandler(!inPip && (browser.media != null || webFullscreen ||
         screen != Screen.Browser || browser.url.isNotEmpty() || (browser.closeOnBack && tabs.tabs.size > 1)), onBack = back)
 
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
         when {
             inPip || webFullscreen || nativeFullscreen -> Unit
@@ -1991,6 +2396,10 @@ private fun BrowserContent(
                     ) {
                         LinearProgressIndicator(progress = { browser.progress / 100f }, modifier = Modifier.fillMaxWidth())
                     }
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    )
                     val typed = address.text.toString().trim()
                     if (addressFocused && typed.isNotEmpty() && typed != displayedUrl) {
                         val matches = tabs.history.entries.filter {
@@ -2152,6 +2561,31 @@ private fun BrowserContent(
                 dismissButton = { TextButton(onClick = { browser.downloadChoice = null }) { Text("Cancel") } }
             )
         }
+    }
+    if (!inPip && !browser.nativeHome && !addressFocused && screen == Screen.Browser && PasswordManager.activeSuggestions.isNotEmpty()) {
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+        ) {
+            LoginSuggestionBar(
+                suggestions = PasswordManager.activeSuggestions,
+                onSelect = { selected ->
+                    browser.videoPort?.postMessage(
+                        JSONObject()
+                            .put("action", "fill_login")
+                            .put("username", selected.username)
+                            .put("password", selected.password)
+                    )
+                    PasswordManager.activeSuggestions = emptyList()
+                },
+                onDelete = { target ->
+                    PasswordManager.delete(pwdContext, target)
+                }
+            )
+        }
+    }
     }
 }
 
@@ -2592,8 +3026,8 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                 }
                 view.findViewById<ImageButton>(R.id.browser_exo_pip).apply {
                     val shape = aspect
-                    visibility = if (supportsPip && shape != null && !inPip) View.VISIBLE else View.GONE
-                    setOnClickListener { if (shape != null) enterPip(shape) }
+                    visibility = if (supportsPip && !inPip) View.VISIBLE else View.GONE
+                    setOnClickListener { enterPip(shape ?: android.util.Rational(16, 9)) }
                 }
             }
         )
@@ -2602,6 +3036,37 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     }
 }
 
+private data class PendingHttpAuth(
+    val key: String,
+    val host: String,
+    val message: String,
+    val initialUser: String,
+    val initialPass: String,
+    val onConfirm: (String, String) -> Unit,
+    val onDismiss: () -> Unit
+)
+
+private var pendingHttpAuth by mutableStateOf<PendingHttpAuth?>(null)
+
+private data class ChoiceOption(
+    val id: String,
+    val label: String,
+    val selected: Boolean,
+    val disabled: Boolean,
+    val isGroupHeader: Boolean = false,
+    val isSeparator: Boolean = false
+)
+
+private class PendingChoicePrompt(
+    val title: String,
+    val multiple: Boolean,
+    val options: List<ChoiceOption>,
+    val onConfirmSingle: (String) -> Unit,
+    val onConfirmMultiple: (Array<String>) -> Unit,
+    val onDismiss: () -> Unit
+)
+
+private var pendingChoicePrompt by mutableStateOf<PendingChoicePrompt?>(null)
 private val experimentCheckScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main.immediate)
 private var experimentCheckRunning by mutableStateOf(false)
 private var experimentCheckStatus by mutableStateOf<String?>(null)

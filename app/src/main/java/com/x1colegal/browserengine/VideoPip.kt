@@ -16,8 +16,8 @@ internal const val PIP_COMMAND = "command"
 
 internal enum class PipCommand(val label: String, val icon: Int) {
     BACK("Rewind", android.R.drawable.ic_media_rew),
-    PLAY("Play", android.R.drawable.ic_media_play),
-    PAUSE("Pause", android.R.drawable.ic_media_pause),
+    PLAY("Play", R.drawable.ic_pip_play),
+    PAUSE("Pause", R.drawable.ic_pip_pause),
     FORWARD("Fast-forward", android.R.drawable.ic_media_ff);
 
     fun run(player: Player) {
@@ -64,7 +64,7 @@ internal fun pipParams(
     val playback = if (playing) PipCommand.PAUSE else PipCommand.PLAY
     val actions = listOf(PipCommand.BACK, playback, PipCommand.FORWARD).filter(available).map { command ->
         val intent = Intent(PIP_CONTROL).setPackage(context.packageName).putExtra(PIP_COMMAND, command.name)
-        val callback = PendingIntent.getBroadcast(context, command.ordinal, intent, PendingIntent.FLAG_IMMUTABLE)
+        val callback = PendingIntent.getBroadcast(context, command.ordinal, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         RemoteAction(Icon.createWithResource(context, command.icon), command.label, command.label, callback)
     }
     return PictureInPictureParams.Builder().setAspectRatio(aspect).setActions(actions).build()

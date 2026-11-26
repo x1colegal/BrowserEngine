@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1
+
+- Added Chrome-style pinned site shortcuts on the native home screen (add, edit, and remove shortcuts).
+- Added `imePadding()` keyboard inset handling on the native home screen so the UI adjusts cleanly when the keyboard opens.
+- Added saved login / password management (`PasswordManager`), keyboard-aligned login suggestion bar with delete confirmation, top-aligned Save/Update password banner, and HTTP Basic/Digest authentication prompt with credential caching.
+- Added HTML `<select>` dropdown dialog (`PromptDelegate.onChoicePrompt`) supporting single-select, multi-select, optgroups, and separators.
+- Improved Picture-in-Picture (PiP) playback and controls for web videos (HLS/Owncast and YouTube), including Play/Pause `MediaSession` & `RemoteAction` controls, auto-pause when PiP is closed, and orientation/system bar restoration when entering PiP from fullscreen.
+- Fixed Certificate Details visibility for self-signed HTTPS certificates and IPv6 hosts in Connection details.
+
 ## 2.0
 
 - Aggregate world news from multiple news sources without an 8-story cap, and add Science and Business sections to the native home feed.

@@ -41,6 +41,24 @@ html.browserengine-pip video.browserengine-pip-video {
 html.browserengine-pip .vjs-control-bar,
 html.browserengine-pip .vjs-big-play-button,
 html.browserengine-pip .vjs-loading-spinner,
-html.browserengine-pip .vjs-modal-dialog {
+html.browserengine-pip .vjs-modal-dialog,
+html.browserengine-pip .browserengine-pip-ancestor > :not(.browserengine-pip-ancestor):not(.browserengine-pip-video) {
   display: none !important;
+}
+
+.browserengine-pip-placeholder {
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: 2147483646 !important;
+  background: rgba(13, 13, 13, 0.56) !important;
+  backdrop-filter: blur(18px) !important;
+  -webkit-backdrop-filter: blur(18px) !important;
+  color: #f2f2f2 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-align: center !important;
+  font: 600 14px/1.35 system-ui, -apple-system, sans-serif !important;
+  padding: 16px !important;
+  pointer-events: auto !important;
 }

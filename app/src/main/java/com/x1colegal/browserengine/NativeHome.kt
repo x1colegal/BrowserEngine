@@ -1,8 +1,14 @@
 package com.x1colegal.browserengine
 
+import android.content.Context
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardActions
@@ -26,11 +32,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -231,7 +240,7 @@ internal fun NativeHomeScreen(
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         LazyColumn(
-            modifier = Modifier.widthIn(max = 840.dp).fillMaxSize(),
+            modifier = Modifier.widthIn(max = 840.dp).fillMaxSize().imePadding(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -291,6 +300,13 @@ internal fun NativeHomeScreen(
                         locationResults = emptyList()
                         editingLocation = true
                     }
+                )
+            }
+            item(key = "pinned_sites", contentType = "pinned_sites") {
+                PinnedSitesGrid(
+                    onOpenUrl = navigate,
+                    executor = executor,
+                    sessionClient = sessionClient
                 )
             }
             if (loading && sections == null) {
@@ -604,4 +620,219 @@ private fun rememberRemoteImageState(
         }
     }
     return image to loading
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PinnedSitesGrid(
+    onOpenUrl: (String) -> Unit,
+    executor: GeckoWebExecutor,
+    sessionClient: HomeSessionClient
+) {
+    val context = LocalContext.current.applicationContext
+    var sites by remember { mutableStateOf(loadPinnedSites(context)) }
+    var editingIndex by remember { mutableStateOf<Int?>(null) }
+    var menuIndex by remember { mutableStateOf<Int?>(null) }
+    var showAddDialog by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        val rows = (sites.mapIndexed { idx, site -> idx to site } + listOf(-1 to null)).chunked(4)
+        for (row in rows) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                for ((idx, site) in row) {
+                    if (site == null) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { showAddDialog = true }
+                                .padding(vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                modifier = Modifier.size(48.dp),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text("+", style = MaterialTheme.typography.titleLarge)
+                                }
+                            }
+                            Text(
+                                "Add shortcut",
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    } else {
+                        val isMenuOpen = menuIndex == idx
+                        val scale by animateFloatAsState(if (isMenuOpen) 0.92f else 1f, label = "shortcut_scale")
+                        val faviconUrl = remember(site.first) {
+                            runCatching {
+                                val uri = android.net.Uri.parse(site.first)
+                                val scheme = uri.scheme ?: "https"
+                                val host = uri.host
+                                if (!host.isNullOrBlank()) "$scheme://$host/favicon.ico" else null
+                            }.getOrNull()
+                        }
+                        val (favicon, _) = rememberRemoteImageState(faviconUrl, executor, sessionClient)
+                        Box(modifier = Modifier.weight(1f)) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .graphicsLayer {
+                                        scaleX = scale
+                                        scaleY = scale
+                                    }
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .combinedClickable(
+                                        onClick = { onOpenUrl(site.first) },
+                                        onLongClick = { menuIndex = idx }
+                                    )
+                                    .padding(vertical = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    modifier = Modifier.size(48.dp),
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        if (favicon != null) {
+                                            Image(
+                                                bitmap = favicon,
+                                                contentDescription = site.second,
+                                                modifier = Modifier.size(28.dp).clip(CircleShape),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        } else {
+                                            Text(
+                                                site.second.firstOrNull()?.uppercase() ?: "?",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    site.second,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = isMenuOpen,
+                                onDismissRequest = { menuIndex = null }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Edit shortcut") },
+                                    onClick = {
+                                        menuIndex = null
+                                        editingIndex = idx
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Remove") },
+                                    onClick = {
+                                        menuIndex = null
+                                        val updated = sites.toMutableList().apply { removeAt(idx) }
+                                        sites = updated
+                                        savePinnedSites(context, updated)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                repeat(4 - row.size) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+
+    if (showAddDialog || editingIndex != null) {
+        val current = editingIndex?.let { sites.getOrNull(it) }
+        var nameInput by remember(editingIndex, showAddDialog) { mutableStateOf(current?.second.orEmpty()) }
+        var urlInput by remember(editingIndex, showAddDialog) { mutableStateOf(current?.first.orEmpty()) }
+        AlertDialog(
+            onDismissRequest = {
+                showAddDialog = false
+                editingIndex = null
+            },
+            title = { Text(if (current == null) "Add shortcut" else "Edit shortcut") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = nameInput,
+                        onValueChange = { nameInput = it },
+                        label = { Text("Name") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = urlInput,
+                        onValueChange = { urlInput = it },
+                        label = { Text("URL") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val trimmedUrl = urlInput.trim().let {
+                        if (it.startsWith("http://") || it.startsWith("https://")) it else "https://$it"
+                    }
+                    val trimmedName = nameInput.trim().ifEmpty { trimmedUrl }
+                    if (urlInput.isNotBlank()) {
+                        val updated = sites.toMutableList()
+                        val idx = editingIndex
+                        if (idx != null && idx in updated.indices) {
+                            updated[idx] = trimmedUrl to trimmedName
+                        } else {
+                            updated.add(trimmedUrl to trimmedName)
+                        }
+                        sites = updated
+                        savePinnedSites(context, updated)
+                    }
+                    showAddDialog = false
+                    editingIndex = null
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showAddDialog = false
+                    editingIndex = null
+                }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+private fun loadPinnedSites(context: Context): List<Pair<String, String>> {
+    val raw = AppPrefs.get(context, "pinned_sites").getString("items", null) ?: return emptyList()
+    val array = runCatching { org.json.JSONArray(raw) }.getOrNull() ?: return emptyList()
+    return (0 until array.length()).mapNotNull { idx ->
+        val obj = array.optJSONObject(idx) ?: return@mapNotNull null
+        val url = obj.optString("url").trim()
+        val name = obj.optString("name").trim()
+        if (url.isNotEmpty() && name.isNotEmpty()) url to name else null
+    }
+}
+
+private fun savePinnedSites(context: Context, sites: List<Pair<String, String>>) {
+    val array = org.json.JSONArray()
+    for ((url, name) in sites) {
+        array.put(JSONObject().put("url", url).put("name", name))
+    }
+    AppPrefs.get(context, "pinned_sites").edit().putString("items", array.toString()).apply()
 }
