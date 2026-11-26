@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.5
+
+- Removed the `ClientVersion` HTTP header from all API requests and switched `/api/create/session` and `/server/experiments/gen/token` to `POST` with formatted JSON bodies carrying `clientVersion`.
+
 ## 2.4
 
 - Switched `/api/generate/token` from `GET` with `X-Home-Session` header to `POST` with a formatted JSON body (`{"id": ...}`).

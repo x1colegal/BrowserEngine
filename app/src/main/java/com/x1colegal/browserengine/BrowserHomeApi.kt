@@ -51,7 +51,6 @@ private fun apiRequest(
     while (true) {
         val request = WebRequest.Builder(API_BASE + path)
             .header("Accept", "application/json")
-            .header("ClientVersion", BuildConfig.VERSION_NAME)
             .header("User-Agent", BrowserNetwork.agent(false))
         headers.forEach { (key, value) -> request.header(key, value) }
         if (body != null) {
@@ -190,7 +189,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
     @Synchronized
     private fun getOrCreate(onBackoff: ((Int) -> Unit)? = null): HomeCredentials {
         cachedSession()?.let { return it }
-        val created = apiRequest(appContext, executor, "/api/create/session", onBackoff = onBackoff)
+        val created = apiRequest(appContext, executor, "/api/create/session", body = JSONObject(), onBackoff = onBackoff)
         val id = created.getString("id")
         val token = apiRequest(
             appContext,
@@ -308,7 +307,6 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             val request = WebRequest.Builder(url)
                 .method("POST")
                 .header("Accept", "image/*")
-                .header("ClientVersion", BuildConfig.VERSION_NAME)
                 .header("User-Agent", BrowserNetwork.agent(false))
                 .header("Content-Type", "application/json; charset=windows-1252")
                 .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
@@ -443,6 +441,7 @@ internal object ServerExperiments {
                 context,
                 executor,
                 "/server/experiments/gen/token",
+                body = JSONObject(),
                 onBackoff = onBackoff
             ).getString("token")
             if (!generated.matches(Regex("[a-f0-9]{64}"))) throw IOException("Invalid experiment token")

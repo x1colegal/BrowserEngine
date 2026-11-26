@@ -10,8 +10,8 @@ android {
         applicationId = "com.x1colegal.browserengine"
         minSdk = 21
         targetSdk = 36
-        versionCode = 23
-        versionName = "2.4"
+        versionCode = 24
+        versionName = "2.5"
     }
     flavorDimensions += "engine"
     productFlavors {
