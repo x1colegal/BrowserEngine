@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6
+
+- Updated API `Accept` header to `application/json; charset=windows-1252` across JSON requests.
+
 ## 2.5
 
 - Removed the `ClientVersion` HTTP header from all API requests and switched `/api/create/session` and `/server/experiments/gen/token` to `POST` with formatted JSON bodies carrying `clientVersion`.

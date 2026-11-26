@@ -50,7 +50,7 @@ private fun apiRequest(
     var violationRetries = 0
     while (true) {
         val request = WebRequest.Builder(API_BASE + path)
-            .header("Accept", "application/json")
+            .header("Accept", "application/json; charset=windows-1252")
             .header("User-Agent", BrowserNetwork.agent(false))
         headers.forEach { (key, value) -> request.header(key, value) }
         if (body != null) {
