@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2
+
+- Changed native home pinned site shortcuts to scroll horizontally instead of wrapping into multiple vertical rows.
+- Unified API backoff (`backoff` / `471`) handling across all BrowserEngine API endpoints (including token generation) and removed legacy HTTP `429` retry handling.
+- Fixed ExoPlayer media tabs opened from Home showing the Home icon/label on the tab switcher screen instead of the media host and play icon.
+- Fixed playable media URLs (such as HLS `.m3u8` streams) not being recorded in browsing history while keeping actual downloads excluded.
+- Fixed Connection Details (TLS version, cipher suite, key exchange, HTTP version, remote IP, and Certificate Details) showing Unavailable during ExoPlayer playback by inspecting `GeckoWebExecutor` (`tabId: -1`) requests and capturing `WebResponse.certificate`.
+
 ## 2.1
 
 - Added Chrome-style pinned site shortcuts on the native home screen (add, edit, and remove shortcuts).

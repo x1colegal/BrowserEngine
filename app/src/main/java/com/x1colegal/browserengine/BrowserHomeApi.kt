@@ -43,45 +43,76 @@ private fun apiRequest(
     executor: GeckoWebExecutor,
     path: String,
     body: JSONObject? = null,
-    headers: Map<String, String> = emptyMap()
+    headers: Map<String, String> = emptyMap(),
+    onBackoff: ((Int) -> Unit)? = null
 ): JSONObject {
-    val request = WebRequest.Builder(API_BASE + path)
-        .header("Accept", "application/json")
-        .header("ClientVersion", BuildConfig.VERSION_NAME)
-        .header("User-Agent", BrowserNetwork.agent(false))
-    headers.forEach { (key, value) -> request.header(key, value) }
-    if (body != null) {
-        val bytes = body.put("clientVersion", BuildConfig.VERSION_NAME).toString().toByteArray(CP1252)
-        request.method("POST")
-            .header("Content-Type", "application/json; charset=windows-1252")
-            .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
-    }
-    val pending = executor.fetch(request.build(), GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS)
-    val response = try {
-        pending.poll(15_000) ?: throw IOException("No BrowserEngine API response")
-    } catch (error: TimeoutException) {
-        pending.withHandler(Handler(Looper.getMainLooper()))
-            .accept({ it?.body?.let { input -> runCatching { input.close() } } }, {})
-        throw IOException("BrowserEngine API timed out", error)
-    }
-    val input = response.body
-    if (response.statusCode !in 200..299) {
-        input?.close()
-        if (response.statusCode == 469) ServerExperiments.recordVersionResponse(context, 469)
-        throw ApiStatus(response.statusCode)
-    }
-    return (input ?: throw IOException("Missing BrowserEngine API response body")).use {
-        val result = ByteArrayOutputStream()
-        val chunk = ByteArray(4096)
-        while (true) {
-            val count = it.read(chunk)
-            if (count < 0) break
-            if (result.size() + count > 512 * 1024) throw IOException("API response too large")
-            result.write(chunk, 0, count)
+    var backoffRounds = 0
+    var violationRetries = 0
+    while (true) {
+        val request = WebRequest.Builder(API_BASE + path)
+            .header("Accept", "application/json")
+            .header("ClientVersion", BuildConfig.VERSION_NAME)
+            .header("User-Agent", BrowserNetwork.agent(false))
+        headers.forEach { (key, value) -> request.header(key, value) }
+        if (body != null) {
+            val payload = JSONObject(body.toString()).put("clientVersion", BuildConfig.VERSION_NAME)
+            val bytes = payload.toString().toByteArray(CP1252)
+            request.method("POST")
+                .header("Content-Type", "application/json; charset=windows-1252")
+                .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
         }
-        JSONObject(String(result.toByteArray(), CP1252)).also { json ->
-            ServerExperiments.recordVersionResponse(context, response.statusCode, json)
+        val pending = executor.fetch(request.build(), GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS)
+        val response = try {
+            pending.poll(15_000) ?: throw IOException("No BrowserEngine API response")
+        } catch (error: TimeoutException) {
+            pending.withHandler(Handler(Looper.getMainLooper()))
+                .accept({ it?.body?.let { input -> runCatching { input.close() } } }, {})
+            throw IOException("BrowserEngine API timed out", error)
         }
+        val input = response.body
+        if (response.statusCode == 471 && violationRetries < 8) {
+            input?.close()
+            violationRetries++
+            try {
+                onBackoff?.invoke(1)
+                Thread.sleep(1000L)
+            } finally {
+                onBackoff?.invoke(0)
+            }
+            continue
+        }
+        if (response.statusCode !in 200..299) {
+            input?.close()
+            if (response.statusCode == 469) ServerExperiments.recordVersionResponse(context, 469)
+            throw ApiStatus(response.statusCode)
+        }
+        val json = (input ?: throw IOException("Missing BrowserEngine API response body")).use {
+            val result = ByteArrayOutputStream()
+            val chunk = ByteArray(4096)
+            while (true) {
+                val count = it.read(chunk)
+                if (count < 0) break
+                if (result.size() + count > 512 * 1024) throw IOException("API response too large")
+                result.write(chunk, 0, count)
+            }
+            JSONObject(String(result.toByteArray(), CP1252)).also { parsed ->
+                ServerExperiments.recordVersionResponse(context, response.statusCode, parsed)
+            }
+        }
+        val backoff = json.optInt("backoff", 0)
+        if (backoff > 0 && backoffRounds < 4) {
+            backoffRounds++
+            try {
+                for (remaining in backoff downTo 1) {
+                    onBackoff?.invoke(remaining)
+                    Thread.sleep(1000L)
+                }
+            } finally {
+                onBackoff?.invoke(0)
+            }
+            continue
+        }
+        return json
     }
 }
 
@@ -157,11 +188,17 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
     }
 
     @Synchronized
-    private fun getOrCreate(): HomeCredentials {
+    private fun getOrCreate(onBackoff: ((Int) -> Unit)? = null): HomeCredentials {
         cachedSession()?.let { return it }
-        val created = apiRequest(appContext, executor, "/api/create/session")
+        val created = apiRequest(appContext, executor, "/api/create/session", onBackoff = onBackoff)
         val id = created.getString("id")
-        val token = apiRequest(appContext, executor, "/api/generate/token", headers = mapOf("X-Home-Session" to id))
+        val token = apiRequest(
+            appContext,
+            executor,
+            "/api/generate/token",
+            headers = mapOf("X-Home-Session" to id),
+            onBackoff = onBackoff
+        )
         val bearer = token.getString("token")
         val expires = token.getLong("expires_at_epoch")
         if (!id.matches(Regex("[a-f0-9]{32}")) || !bearer.matches(Regex("[A-Za-z0-9_-]{43}"))) {
@@ -177,81 +214,31 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
     }
 
     suspend fun loadNativeHome(onBackoff: (Int) -> Unit = {}): HomeFeedData {
-        suspend fun waitRemainingBackoff() {
-            val untilMs = preferences.getLong("backoff_until_ms", 0L)
-            val remainingSec = ((untilMs - System.currentTimeMillis() + 999L) / 1000L).toInt()
-            if (remainingSec > 0) {
-                try {
-                    for (remaining in remainingSec downTo 1) {
-                        onBackoff(remaining)
-                        kotlinx.coroutines.delay(1000L)
-                    }
-                } finally {
-                    onBackoff(0)
-                }
-            }
-            if (untilMs > 0L) {
-                preferences.edit().remove("backoff_until_ms").apply()
-            }
-        }
-
         fun fetchWithSessionRefresh(): Pair<HomeCredentials, JSONObject> {
-            var session = getOrCreate()
+            var session = getOrCreate(onBackoff)
             val feed = try {
-                fetchHomeFeed(session)
+                fetchHomeFeed(session, onBackoff)
             } catch (error: ApiStatus) {
                 if (error.code != 467 && error.code != 401) throw error
                 clearSessionOnly()
-                session = getOrCreate()
-                fetchHomeFeed(session)
+                session = getOrCreate(onBackoff)
+                fetchHomeFeed(session, onBackoff)
             }
             return session to feed
         }
 
-        waitRemainingBackoff()
-
-        var (session, feed) = try {
+        var (_, feed) = try {
             fetchWithSessionRefresh()
-        } catch (error: ApiStatus) {
-            if (error.code != 471) throw error
-            var resolved: Pair<HomeCredentials, JSONObject>? = null
-            for (attempt in 1..8) {
-                onBackoff(1)
-                kotlinx.coroutines.delay(1000L)
-                try {
-                    resolved = fetchWithSessionRefresh()
-                    break
-                } catch (retryError: ApiStatus) {
-                    if (retryError.code != 471 || attempt == 8) throw retryError
-                }
-            }
-            onBackoff(0)
-            resolved!!
         } catch (error: IOException) {
+            if (error is ApiStatus) throw error
             fetchWithSessionRefresh()
-        }
-        val backoff = feed.optInt("backoff", 0)
-        if (backoff > 0) {
-            preferences.edit().putLong("backoff_until_ms", System.currentTimeMillis() + backoff * 1000L).apply()
-            try {
-                for (remaining in backoff downTo 1) {
-                    onBackoff(remaining)
-                    kotlinx.coroutines.delay(1000L)
-                }
-            } finally {
-                onBackoff(0)
-            }
-            preferences.edit().remove("backoff_until_ms").apply()
-            val refreshed = fetchWithSessionRefresh()
-            session = refreshed.first
-            feed = refreshed.second
         }
         val savedLocation = savedWeatherLocation()
         if (feed.optJSONObject("weather") == null && savedLocation.isNotBlank()) {
             runCatching {
-                val active = getOrCreate()
+                val active = getOrCreate(onBackoff)
                 postWeather(active, savedLocation, savedWeatherLabel().takeIf { it.isNotBlank() })
-                feed = fetchHomeFeed(active)
+                feed = fetchHomeFeed(active, onBackoff)
             }
         }
         return feed.homeFeedData(ServerExperiments.pending(appContext).contains(ServerExperiment.HOME_TABS.key))
@@ -344,11 +331,12 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
         return first
     }
 
-    private fun fetchHomeFeed(session: HomeCredentials) = apiRequest(
+    private fun fetchHomeFeed(session: HomeCredentials, onBackoff: ((Int) -> Unit)? = null) = apiRequest(
         appContext,
         executor,
         "/api/home",
-        JSONObject().put("id", session.id).put("token", session.token)
+        JSONObject().put("id", session.id).put("token", session.token),
+        onBackoff = onBackoff
     )
 
     private fun postWeather(session: HomeCredentials, location: String, label: String?) = apiRequest(
@@ -451,7 +439,12 @@ internal object ServerExperiments {
         }
         val executor = apiExecutor(context)
         val token = settings.getString("permanent_token", null) ?: run {
-            val generated = apiRequest(context, executor, "/server/experiments/gen/token").getString("token")
+            val generated = apiRequest(
+                context,
+                executor,
+                "/server/experiments/gen/token",
+                onBackoff = onBackoff
+            ).getString("token")
             if (!generated.matches(Regex("[a-f0-9]{64}"))) throw IOException("Invalid experiment token")
             if (!settings.edit().putString("permanent_token", generated).commit()) {
                 throw IOException("Could not save experiment token")
@@ -459,16 +452,7 @@ internal object ServerExperiments {
             generated
         }
         val request = JSONObject().put("token", token)
-        var response = apiRequest(context, executor, "/server/experiments/get", request)
-        val backoff = response.optInt("backoff", 0)
-        if (backoff > 0) {
-            for (remaining in backoff downTo 1) {
-                onBackoff?.invoke(remaining)
-                Thread.sleep(1000L)
-            }
-            onBackoff?.invoke(0)
-            response = apiRequest(context, executor, "/server/experiments/get", request)
-        }
+        val response = apiRequest(context, executor, "/server/experiments/get", request, onBackoff = onBackoff)
         val flags = response.getJSONObject("experiments")
         val enabled = ServerExperiment.entries.filter { flags.opt(it.key) == true }.map { it.key }.toSet()
         settings.edit()
@@ -494,7 +478,7 @@ class ServerExperimentsWorker(context: Context, params: WorkerParameters) : Work
         ServerExperiments.fetch(applicationContext, onlyIfDue = true)
         Result.success()
     } catch (error: ApiStatus) {
-        if (error.code == 429 || error.code >= 500) Result.retry() else Result.failure()
+        if (error.code >= 500) Result.retry() else Result.failure()
     } catch (_: Exception) {
         Result.retry()
     }

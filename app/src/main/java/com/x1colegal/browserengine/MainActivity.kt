@@ -633,8 +633,16 @@ private class BrowserTabs(
         private set
     private var extensionReady = false
     private var inspector: WebExtension? = null
+    private var mediaInspectorPort: WebExtension.Port? = null
     private var closed = false
     private var nextTabId = 0L
+
+    fun probeMediaConnection(url: String) {
+        if (url.toHttpUriOrNull() == null) return
+        runCatching {
+            mediaInspectorPort?.postMessage(JSONObject().put("action", "probe").put("url", url))
+        }
+    }
 
     init {
         urls.forEach { newTab(it) }
@@ -648,6 +656,33 @@ private class BrowserTabs(
         if (closed) return
         inspector = extension
         extensionReady = true
+        extension?.setMessageDelegate(object : WebExtension.MessageDelegate {
+            override fun onConnect(port: WebExtension.Port) {
+                mediaInspectorPort = port
+                port.setDelegate(object : WebExtension.PortDelegate {
+                    override fun onPortMessage(message: Any, port: WebExtension.Port) {
+                        if (message !is JSONObject) return
+                        val reportUrl = message.optString("url")
+                        if (reportUrl.isEmpty()) return
+                        if (message.optString("http").isNotEmpty() || message.optString("tls").isNotEmpty() ||
+                            message.optString("cipher").isNotEmpty() || message.optString("ip").isNotEmpty()
+                        ) {
+                            tabs.forEach { tab ->
+                                val mediaUrl = tab.media?.url ?: return@forEach
+                                if (reportUrl.sameOriginAs(mediaUrl)) {
+                                    tab.updateMediaSecurity(message)
+                                }
+                            }
+                        }
+                    }
+
+                    override fun onDisconnect(port: WebExtension.Port) {
+                        if (mediaInspectorPort === port) mediaInspectorPort = null
+                    }
+                })
+                tabs.mapNotNull { it.media?.url }.distinct().forEach(::probeMediaConnection)
+            }
+        }, "media_connection")
         tabs.forEach { it.startInspector(extension) }
     }
 
@@ -886,7 +921,10 @@ private class BrowserSession(
         private set
     var security by mutableStateOf<JSONObject?>(null)
         private set
+    var mediaSecurity by mutableStateOf<JSONObject?>(null)
+        private set
     private var pageCertificate by mutableStateOf<GeckoSession.ProgressDelegate.SecurityInformation?>(null)
+    private var mediaCertificate by mutableStateOf<Pair<String, java.security.cert.X509Certificate>?>(null)
     private var rejectedCertificate by mutableStateOf<Pair<String, java.security.cert.X509Certificate>?>(null)
     private var lastAcceptedCertificate by mutableStateOf<Pair<String, java.security.cert.X509Certificate>?>(null)
     private fun String.normalizedHost(): String = trim().removePrefix("[").removeSuffix("]").lowercase()
@@ -895,8 +933,37 @@ private class BrowserSession(
         if (certificateRejected) return rejectedCertificate?.second
         val currentHost = displayUrl.toHttpUriOrNull()?.host?.normalizedHost().orEmpty()
         if (currentHost.isEmpty()) return null
+        if (media != null) {
+            return mediaCertificate?.takeIf { it.first == currentHost }?.second
+                ?: lastAcceptedCertificate?.takeIf { it.first == currentHost }?.second
+        }
         return pageCertificate?.takeIf { it.host.orEmpty().normalizedHost() == currentHost }?.certificate
             ?: lastAcceptedCertificate?.takeIf { it.first == currentHost }?.second
+    }
+
+    fun updateMediaSecurity(info: JSONObject) {
+        mediaSecurity = info
+    }
+
+    fun updateMediaCertificate(responseUrl: String, cert: java.security.cert.X509Certificate?) {
+        if (cert == null) return
+        val certHost = responseUrl.toHttpUriOrNull()?.host?.normalizedHost().orEmpty()
+        if (certHost.isNotEmpty()) {
+            mediaCertificate = certHost to cert
+            lastAcceptedCertificate = certHost to cert
+        }
+    }
+
+    fun openMedia(target: MediaTarget, cert: java.security.cert.X509Certificate? = null) {
+        media = target
+        mediaSecurity = null
+        mediaCertificate = null
+        updateMediaCertificate(target.url, cert)
+        val uri = target.url.toHttpUriOrNull()
+        if (uri != null) {
+            val mediaTitle = uri.lastPathSegment?.takeIf { it.isNotBlank() }.orEmpty()
+            history.recordSite(target.url, mediaTitle, executor, incognito)
+        }
     }
     var failure by mutableStateOf<String?>(null)
         private set
@@ -1081,7 +1148,7 @@ private class BrowserSession(
                 }
                 val mime = BrowserNetwork.mediaMime(request.uri, null)
                 if (mime != null && request.uri.toHttpUriOrNull() != null) {
-                    media = MediaTarget(request.uri, mime, request.triggerUri)
+                    openMedia(MediaTarget(request.uri, mime, request.triggerUri))
                     return GeckoResult.fromValue(org.mozilla.geckoview.AllowOrDeny.DENY)
                 }
                 return null
@@ -1229,7 +1296,8 @@ private class BrowserSession(
                     ?.substringBefore(';')?.trim()?.equals("attachment", true) == true
                 if (!attachment && mime != null && response.uri.toHttpUriOrNull() != null) {
                     response.body?.let { runCatching { it.close() } }
-                    media = MediaTarget(response.uri, mime)
+                    pendingNavigationUrls.clear()
+                    openMedia(MediaTarget(response.uri, mime), response.certificate)
                 } else if (response.statusCode in 200..299 && response.body != null) {
                     history.suppressDownloadUrl(response.uri)
                     pendingNavigationUrls.forEach(history::suppressDownloadUrl)
@@ -1459,7 +1527,7 @@ private class BrowserSession(
         if (isSearch) history.recordSearch(value, target, incognito)
         val mime = BrowserNetwork.mediaMime(target, null)
         if (mime != null) {
-            media = MediaTarget(target, mime)
+            openMedia(MediaTarget(target, mime))
             return
         }
         finishHomeLoading()
@@ -2189,11 +2257,15 @@ private fun BrowserContent(
         ) {
             Box(Modifier.size(1.dp).focusRequester(initialContentFocus).focusable())
             if (media != null && !isSettingsScreen) {
+                LaunchedEffect(media.url, browser.mediaReload) {
+                    tabs.probeMediaConnection(media.url)
+                }
                 key(browser.id, browser.mediaReload) {
                     VideoPlayer(
                         media, browser.desktop, tabs.executor, lifecycleOwner,
                         supportsPip, inPip, nativeFullscreen, enterPip,
-                        { nativeFullscreen = !nativeFullscreen }, onNativePlayer
+                        { nativeFullscreen = !nativeFullscreen }, onNativePlayer,
+                        onMediaCertificate = browser::updateMediaCertificate
                     )
                 }
             } else if (!browser.nativeHome && !isSettingsScreen) {
@@ -2449,7 +2521,7 @@ private fun BrowserContent(
             onDismissRequest = { browser.mediaChoice = null },
             title = { Text("Open in video player?") },
             confirmButton = {
-                TextButton(onClick = { browser.mediaChoice = null; browser.media = target }) { Text("Play") }
+                TextButton(onClick = { browser.mediaChoice = null; browser.openMedia(target) }) { Text("Play") }
             },
             dismissButton = {
                 TextButton(onClick = {
@@ -2643,9 +2715,10 @@ private fun TabList(
             ) {
                 items(tabs.tabs, key = { it.id }) { tab ->
                     val selected = tab === tabs.current
+                    val isHome = tab.nativeHome && tab.media == null
                     val host = tab.displayUrl.toHttpUriOrNull()?.host.orEmpty()
                     val title = tab.title.takeIf { tab.media == null }.orEmpty().ifBlank { host.ifBlank { "New tab" } }
-                    val thumb = if (showThumbnails && !tab.nativeHome) tab.thumbnail else null
+                    val thumb = if (showThumbnails && !isHome && tab.media == null) tab.thumbnail else null
                     OutlinedCard(
                         onClick = { open(tab) },
                         modifier = Modifier.animateItem(
@@ -2668,7 +2741,11 @@ private fun TabList(
                         ) {
                             if (showThumbnails) {
                                 Icon(
-                                    Icons.Default.Language,
+                                    when {
+                                        tab.media != null -> Icons.Default.PlayArrow
+                                        isHome -> Icons.Default.Home
+                                        else -> Icons.Default.Language
+                                    },
                                     contentDescription = null,
                                     modifier = Modifier.size(16.dp).padding(end = 2.dp),
                                     tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -2710,13 +2787,17 @@ private fun TabList(
                                         modifier = Modifier.padding(12.dp)
                                     ) {
                                         Icon(
-                                            if (tab.nativeHome) Icons.Default.Home else Icons.Default.Language,
+                                            when {
+                                                tab.media != null -> Icons.Default.PlayArrow
+                                                isHome -> Icons.Default.Home
+                                                else -> Icons.Default.Language
+                                            },
                                             contentDescription = null,
                                             modifier = Modifier.size(28.dp),
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                         Text(
-                                            if (tab.nativeHome) "Home" else host.ifEmpty { "New tab" },
+                                            if (isHome) "Home" else host.ifEmpty { "New tab" },
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             style = MaterialTheme.typography.bodySmall,
@@ -2875,7 +2956,8 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     reload: () -> Unit
 ) {
     val url = browser.displayUrl.toHttpUriOrNull()
-    val info = browser.security?.takeIf { it.optString("url").sameOriginAs(browser.displayUrl) }
+    val rawInfo = if (browser.media != null) browser.mediaSecurity ?: browser.security else browser.security
+    val info = rawInfo?.takeIf { it.optString("url").sameOriginAs(browser.displayUrl) }
     fun field(name: String) = info?.optString(name).orEmpty()
     fun show(value: String) = value.ifBlank { "Unavailable" }
     val httpDisplay = field("http").ifBlank {
@@ -2942,7 +3024,8 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     fullscreen: Boolean,
     enterPip: (Rational) -> Boolean,
     toggleFullscreen: () -> Unit,
-    onNativePlayer: (Player?) -> Unit
+    onNativePlayer: (Player?) -> Unit,
+    onMediaCertificate: (String, java.security.cert.X509Certificate?) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val lifecycle = lifecycleOwner.lifecycle
@@ -2952,8 +3035,15 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     var showTracks by remember(target) { mutableStateOf(false) }
     val player = remember(target, desktop) {
         runCatching {
+            val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
             val factory = DataSource.Factory {
-                GeckoMediaDataSource(executor, BrowserNetwork.agent(desktop), target.referer)
+                GeckoMediaDataSource(executor, BrowserNetwork.agent(desktop), target.referer) { response ->
+                    val cert = response.certificate
+                    if (cert != null) {
+                        val uri = response.uri
+                        mainHandler.post { onMediaCertificate(uri, cert) }
+                    }
+                }
             }
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(8_000, 180_000, 1_500, 3_000)

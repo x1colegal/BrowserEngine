@@ -115,3 +115,101 @@ browser.tabs.onRemoved.addListener(tabId => {
   lastPeers.delete(tabId);
   lastOriginReports.delete(tabId);
 });
+
+const mediaRequests = {urls: ["http://*/*", "https://*/*"], tabId: -1};
+const bgConnections = new Map();
+const probeControllers = new Map();
+let mediaPort = null;
+
+function sendMediaReport(details) {
+  if (!mediaPort) return;
+  try {
+    mediaPort.postMessage(details);
+  } catch (_) {}
+}
+
+function connectMediaPort() {
+  try {
+    const port = browser.runtime.connectNative("media_connection");
+    mediaPort = port;
+    port.onMessage.addListener(msg => {
+      if (!msg || msg.action !== "probe" || !msg.url) return;
+      const targetUrl = String(msg.url);
+      const prev = probeControllers.get(targetUrl);
+      if (prev) {
+        try { prev.abort(); } catch (_) {}
+      }
+      const ac = new AbortController();
+      probeControllers.set(targetUrl, ac);
+      fetch(targetUrl, {
+        method: "GET",
+        headers: {"Range": "bytes=0-0"},
+        cache: "no-store",
+        credentials: "include",
+        signal: ac.signal
+      }).then(resp => {
+        try { resp.body?.cancel(); } catch (_) {}
+      }).catch(() => {}).finally(() => {
+        if (probeControllers.get(targetUrl) === ac) {
+          probeControllers.delete(targetUrl);
+        }
+      });
+    });
+    port.onDisconnect.addListener(() => {
+      if (mediaPort === port) mediaPort = null;
+    });
+  } catch (_) {}
+}
+
+connectMediaPort();
+
+browser.webRequest.onHeadersReceived.addListener(async request => {
+  const details = {
+    url: request.url,
+    http: request.statusLine?.split(" ")[0] || "",
+    ip: (!request.fromCache && request.ip) ? request.ip : "",
+    fromCache: Boolean(request.fromCache),
+    cachedIp: false
+  };
+  try {
+    const info = await browser.webRequest.getSecurityInfo(request.requestId);
+    if (info) {
+      details.cipher = info.cipherSuite || "";
+      details.keyExchange = info.keaGroupName || "";
+      details.tls = info.protocolVersion || "";
+      details.state = info.state || "";
+    }
+  } catch (_) {}
+  if (details.http || details.tls || details.cipher || details.ip) {
+    bgConnections.set(request.requestId, details);
+    sendMediaReport(details);
+  }
+}, mediaRequests, ["blocking"]);
+
+browser.webRequest.onResponseStarted.addListener(request => {
+  const details = bgConnections.get(request.requestId);
+  if (details) {
+    bgConnections.delete(request.requestId);
+    let changed = false;
+    if (!request.fromCache && request.ip && details.ip !== request.ip) {
+      details.ip = request.ip;
+      details.fromCache = false;
+      changed = true;
+    }
+    const statusHttp = request.statusLine?.split(" ")[0] || "";
+    if (!details.http && statusHttp) {
+      details.http = statusHttp;
+      changed = true;
+    }
+    if (changed) sendMediaReport(details);
+  }
+  const ac = probeControllers.get(request.url);
+  if (ac) {
+    probeControllers.delete(request.url);
+    try { ac.abort(); } catch (_) {}
+  }
+}, mediaRequests);
+
+browser.webRequest.onErrorOccurred.addListener(request => {
+  bgConnections.delete(request.requestId);
+}, mediaRequests);

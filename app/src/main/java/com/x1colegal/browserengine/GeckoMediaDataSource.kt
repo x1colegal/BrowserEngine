@@ -26,7 +26,8 @@ internal class MediaRangeRequiredException :
 internal class GeckoMediaDataSource(
     private val executor: GeckoWebExecutor,
     private val userAgent: String,
-    private val referer: String?
+    private val referer: String?,
+    private val onResponse: ((WebResponse) -> Unit)? = null
 ) : BaseDataSource(true) {
     private var spec: DataSpec? = null
     private var resolvedUri: Uri? = null
@@ -78,6 +79,7 @@ internal class GeckoMediaDataSource(
         }
 
         val next = fetch(request.build())
+        onResponse?.invoke(next)
         if (resolvedUri == null) {
             resolvedUri = Uri.parse(next.uri)
             responseHeaders = next.headers.mapValues { listOf(it.value) }
