@@ -56,7 +56,7 @@ private fun apiRequest(
         headers.forEach { (key, value) -> request.header(key, value) }
         if (body != null) {
             val payload = JSONObject(body.toString()).put("clientVersion", BuildConfig.VERSION_NAME)
-            val bytes = payload.toString().toByteArray(CP1252)
+            val bytes = payload.toString(2).toByteArray(CP1252)
             request.method("POST")
                 .header("Content-Type", "application/json; charset=windows-1252")
                 .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
@@ -303,7 +303,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
                 .put("id", session.id)
                 .put("token", session.token)
                 .put("clientVersion", BuildConfig.VERSION_NAME)
-                .toString()
+                .toString(2)
                 .toByteArray(CP1252)
             val request = WebRequest.Builder(url)
                 .method("POST")

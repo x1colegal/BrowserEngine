@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3
+
+- Formatted outgoing API `POST` JSON request bodies with 2-space indentation (`toString(2)`).
+
 ## 2.2
 
 - Changed native home pinned site shortcuts to scroll horizontally instead of wrapping into multiple vertical rows.
