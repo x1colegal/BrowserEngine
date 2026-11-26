@@ -92,10 +92,22 @@ internal fun JSONObject.toWeatherInfo(): WeatherInfo? {
     )
 }
 
-internal fun JSONObject.homeFeedData(): HomeFeedData =
-    HomeFeedData(sections = homeSections(), weather = optJSONObject("weather")?.toWeatherInfo())
+internal fun JSONObject.homeFeedData(useDynamicTabs: Boolean = false): HomeFeedData =
+    HomeFeedData(sections = homeSections(useDynamicTabs), weather = optJSONObject("weather")?.toWeatherInfo())
 
-internal fun JSONObject.homeSections(): List<HomeSection> {
+internal fun JSONObject.homeSections(useDynamicTabs: Boolean = false): List<HomeSection> {
+    val tabs = if (useDynamicTabs) {
+        optJSONArray("tabs")?.let { array ->
+            (0 until array.length()).mapNotNull { idx ->
+                val obj = array.optJSONObject(idx) ?: return@mapNotNull null
+                val uiName = obj.optString("ui_name").trim()
+                val internalName = obj.optString("internal_name").trim()
+                if (uiName.isNotEmpty() && internalName.isNotEmpty()) HomeTabConfig(uiName, internalName) else null
+            }
+        }.orEmpty()
+    } else {
+        emptyList()
+    }
     fun entries(key: String, convert: (JSONObject) -> HomeEntry?): List<HomeEntry> {
         val array = optJSONArray(key) ?: return emptyList()
         return (0 until array.length()).mapNotNull { it ->
@@ -117,6 +129,18 @@ internal fun JSONObject.homeSections(): List<HomeSection> {
             it.optString("published_at").substringBefore('T').takeIf { date -> date != "null" }.orEmpty()
         ).filter(String::isNotBlank).joinToString(" · "))
     }
+    val science = entries("science_news") {
+        it.entry(it.optString("title"), listOf(
+            it.optString("source"),
+            it.optString("published_at").substringBefore('T').takeIf { date -> date != "null" }.orEmpty()
+        ).filter(String::isNotBlank).joinToString(" · "))
+    }
+    val business = entries("business_news") {
+        it.entry(it.optString("title"), listOf(
+            it.optString("source"),
+            it.optString("published_at").substringBefore('T').takeIf { date -> date != "null" }.orEmpty()
+        ).filter(String::isNotBlank).joinToString(" · "))
+    }
     val tech = entries("news") {
         it.entry(it.optString("title"), "${it.optString("host")} · ${it.optInt("comments")} comments")
     }
@@ -131,8 +155,30 @@ internal fun JSONObject.homeSections(): List<HomeSection> {
             .map { HomeEntry(it, "", null) }
     }.orEmpty()
 
+    if (tabs.isNotEmpty()) {
+        return buildList {
+            for (tab in tabs) {
+                val items = when (tab.internalName) {
+                    "news" -> tech
+                    "featured" -> listOfNotNull(featured)
+                    "on_this_day" -> events
+                    "did_you_know" -> facts
+                    else -> entries(tab.internalName) {
+                        it.entry(it.optString("title"), listOf(
+                            it.optString("source"),
+                            it.optString("published_at").substringBefore('T').takeIf { date -> date != "null" }.orEmpty()
+                        ).filter(String::isNotBlank).joinToString(" · "))
+                    }
+                }
+                if (items.isNotEmpty()) {
+                    add(HomeSection(tab.uiName, HomeEntry(tab.uiName, "", null), items))
+                }
+            }
+        }
+    }
+
     return buildList {
-        add(HomeSection("News", HomeEntry("BBC News", "", "https://www.bbc.com/news/world"), world))
+        add(HomeSection("News", HomeEntry("BBC News", "", "https://www.bbc.com/news/world"), world.take(8)))
         add(HomeSection("Tech news", HomeEntry("Hacker News", "", "https://news.ycombinator.com/"), tech))
         add(HomeSection("Explore", wikipedia, listOfNotNull(featured)))
         if (events.isNotEmpty()) add(HomeSection("On this day", wikipedia, events))
@@ -277,10 +323,11 @@ internal fun NativeHomeScreen(
             }
             sections.orEmpty().forEach { section ->
                 item(key = "header:${section.title}", contentType = "section header") {
-                    Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(section.title, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                        TextButton(onClick = { section.source.url?.let(navigate) }) { Text(section.source.title) }
-                    }
+                    Text(
+                        section.title,
+                        Modifier.fillMaxWidth().padding(top = 12.dp),
+                        style = MaterialTheme.typography.titleLarge
+                    )
                 }
                 if (section.entries.isEmpty()) {
                     item(key = "empty:${section.title}", contentType = "empty section") { Text("No stories available.", color = MaterialTheme.colorScheme.onSurfaceVariant) }

@@ -263,7 +263,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val canApply = experimentPreferences.getBoolean(ServerExperiments.PROMPTED, false)
         if (canApply) applyPendingExperiments()
-        val forceCheck = !checkedLaunchVersion || discontinued
+        val forceCheck = discontinued
         checkedLaunchVersion = true
         foregroundExperimentCheck = lifecycleScope.launch {
             withContext(Dispatchers.IO) {
@@ -274,7 +274,6 @@ class MainActivity : ComponentActivity() {
                 deprecatedCheckedThisLaunch = true
                 deprecatedPrompt = true
             }
-            if (canApply) applyPendingExperiments()
         }
     }
 
@@ -2603,36 +2602,49 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     }
 }
 
+private val experimentCheckScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main.immediate)
+private var experimentCheckRunning by mutableStateOf(false)
+private var experimentCheckStatus by mutableStateOf<String?>(null)
+
 @Composable
 private fun ServerExperimentSettings(active: Set<String>) {
     val context = LocalContext.current.applicationContext
-    val scope = rememberCoroutineScope()
-    var checking by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
     ListItem(
         headlineContent = { Text("Server Experiments") },
         supportingContent = {
             Column {
                 Text("Explore New Functions without updating the app.")
-                status?.let { Text(it) }
+                experimentCheckStatus?.let { Text(it) }
             }
         },
         leadingContent = { Icon(Icons.Default.Science, null) }
     )
     TextButton(
-        enabled = !checking,
+        enabled = !experimentCheckRunning,
         modifier = Modifier.padding(horizontal = 8.dp),
         onClick = {
-            checking = true
-            status = "Checking for experiments…"
-            scope.launch {
-                val success = withContext(Dispatchers.IO) {
-                    runCatching { ServerExperiments.fetch(context) }.isSuccess
+            experimentCheckRunning = true
+            experimentCheckStatus = "Checking for experiments…"
+            experimentCheckScope.launch {
+                try {
+                    val success = withContext(Dispatchers.IO) {
+                        runCatching {
+                            ServerExperiments.fetch(context) { seconds ->
+                                experimentCheckScope.launch {
+                                    if (experimentCheckRunning) {
+                                        experimentCheckStatus = if (seconds > 0) "Checking for experiments… Waiting ${seconds}s"
+                                        else "Checking for experiments…"
+                                    }
+                                }
+                            }
+                        }.isSuccess
+                    }
+                    experimentCheckStatus = if (!success) "Couldn't check for experiments." else
+                        if (ServerExperiments.pending(context) == active) "Experiments are up to date."
+                        else "Changes are ready for the next launch."
+                } finally {
+                    experimentCheckRunning = false
                 }
-                status = if (!success) "Couldn't check for experiments." else
-                    if (ServerExperiments.pending(context) == active) "Experiments are up to date."
-                    else "Changes are ready for the next launch."
-                checking = false
             }
         }
     ) { Text("Try to get new Experiments now") }

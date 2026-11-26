@@ -76,7 +76,7 @@ private fun apiRequest(
         while (true) {
             val count = it.read(chunk)
             if (count < 0) break
-            if (result.size() + count > 128 * 1024) throw IOException("API response too large")
+            if (result.size() + count > 512 * 1024) throw IOException("API response too large")
             result.write(chunk, 0, count)
         }
         JSONObject(String(result.toByteArray(), CP1252)).also { json ->
@@ -254,7 +254,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
                 feed = fetchHomeFeed(active)
             }
         }
-        return feed.homeFeedData()
+        return feed.homeFeedData(ServerExperiments.pending(appContext).contains(ServerExperiment.HOME_TABS.key))
     }
 
     @Synchronized
@@ -371,8 +371,11 @@ internal enum class ServerExperiment(val key: String) {
     CONNECTION_INFO_ICON("connection_info_icon"),
     WEATHER_LOADING_PLACEHOLDER("weather_loading_placeholder"),
     TAB_THUMBNAILS("tab_thumbnails"),
-    CONTEXT_MENU_ACTIONS("context_menu_actions")
+    CONTEXT_MENU_ACTIONS("context_menu_actions"),
+    HOME_TABS("home_tabs")
 }
+
+internal data class HomeTabConfig(val uiName: String, val internalName: String)
 
 internal object ServerExperiments {
     const val FLAGS = "pending_flags"
@@ -432,7 +435,11 @@ internal object ServerExperiments {
     fun pending(context: Context): Set<String> =
         preferences(context).getStringSet(FLAGS, emptySet()).orEmpty().toSet()
 
-    fun fetch(context: Context, onlyIfDue: Boolean = false) = synchronized(fetchLock) {
+    fun fetch(
+        context: Context,
+        onlyIfDue: Boolean = false,
+        onBackoff: ((Int) -> Unit)? = null
+    ) = synchronized(fetchLock) {
         val settings = preferences(context)
         val versionUpdated = settings.getInt(LAST_VERSION_CODE, -1) != BuildConfig.VERSION_CODE
         if (onlyIfDue && !versionUpdated) {
@@ -451,18 +458,21 @@ internal object ServerExperiments {
             }
             generated
         }
-        val request = JSONObject().put("token", token).put(
-            "supportedExperiments", org.json.JSONArray(ServerExperiment.entries.map { it.key })
-        )
+        val request = JSONObject().put("token", token)
         var response = apiRequest(context, executor, "/server/experiments/get", request)
         val backoff = response.optInt("backoff", 0)
         if (backoff > 0) {
-            Thread.sleep(backoff * 1000L)
+            for (remaining in backoff downTo 1) {
+                onBackoff?.invoke(remaining)
+                Thread.sleep(1000L)
+            }
+            onBackoff?.invoke(0)
             response = apiRequest(context, executor, "/server/experiments/get", request)
         }
         val flags = response.getJSONObject("experiments")
         val enabled = ServerExperiment.entries.filter { flags.opt(it.key) == true }.map { it.key }.toSet()
         settings.edit()
+            .remove("home_tabs")
             .putStringSet(FLAGS, enabled)
             .putLong(LAST_CHECK, System.currentTimeMillis())
             .putInt(LAST_VERSION_CODE, BuildConfig.VERSION_CODE)

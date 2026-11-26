@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0
+
+- Aggregate world news from multiple news sources without an 8-story cap, and add Science and Business sections to the native home feed.
+- Remove source link buttons from native home section headers.
+
 ## 1.12
 
 - Fix home reload state when toggling between Incognito and normal mode while the home feed is loading.
