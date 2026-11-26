@@ -196,7 +196,7 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
             appContext,
             executor,
             "/api/generate/token",
-            headers = mapOf("X-Home-Session" to id),
+            body = JSONObject().put("id", id),
             onBackoff = onBackoff
         )
         val bearer = token.getString("token")

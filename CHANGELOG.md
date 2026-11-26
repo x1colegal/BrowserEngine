@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4
+
+- Switched `/api/generate/token` from `GET` with `X-Home-Session` header to `POST` with a formatted JSON body (`{"id": ...}`).
+
 ## 2.3
 
 - Formatted outgoing API `POST` JSON request bodies with 2-space indentation (`toString(2)`).
