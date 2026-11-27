@@ -95,6 +95,19 @@ internal class BrowserHistory private constructor(private val app: Context) {
         ensureFavicon(uri, host, executor)
     }
 
+    fun recordLocalFile(fileUri: String, title: String, incognito: Boolean) {
+        if (incognito || fileUri.isBlank()) return
+        val displayTitle = title.trim().ifBlank { fileUri.substringAfterLast('/').ifBlank { "Local file" } }
+        val existingIndex = entries.indexOfFirst { it.type == HistoryType.SITE && it.url == fileUri }
+        if (existingIndex == 0) {
+            entries[0] = entries[0].copy(title = displayTitle, timestamp = System.currentTimeMillis())
+            save()
+        } else {
+            if (existingIndex > 0) entries.removeAt(existingIndex)
+            addEntry(HistoryEntry(UUID.randomUUID().toString(), HistoryType.SITE, displayTitle, fileUri, "", System.currentTimeMillis()))
+        }
+    }
+
     fun iconFor(host: String): ImageBitmap? {
         if (host.isBlank()) return null
         icons[host]?.let { return it }

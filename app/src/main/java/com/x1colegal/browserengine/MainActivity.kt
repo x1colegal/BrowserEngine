@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -57,6 +58,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -167,7 +169,18 @@ class MainActivity : ComponentActivity() {
     private var nativePlayer: Player? = null
     private var pipAspect = Rational(16, 9)
     private val pipPlayerListener = object : Player.Listener {
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = updatePipControls()
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (playWhenReady && PipSessionHost.exoActive) {
+                PipSessionHost.closePip?.invoke()
+            }
+            updatePipControls()
+        }
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying && PipSessionHost.exoActive) {
+                PipSessionHost.closePip?.invoke()
+            }
+            updatePipControls()
+        }
         override fun onAvailableCommandsChanged(availableCommands: Player.Commands) = updatePipControls()
     }
     private val pipControls = object : BroadcastReceiver() {
@@ -241,6 +254,9 @@ class MainActivity : ComponentActivity() {
                 this, pipControls, IntentFilter(PIP_CONTROL), ContextCompat.RECEIVER_NOT_EXPORTED
             )
         }
+        if (savedInstanceState == null) {
+            handleExternalIntent(intent)
+        }
         applyStatusBarTheme(browser.dark)
         setContent {
             val dark = browser.dark
@@ -255,6 +271,77 @@ class MainActivity : ComponentActivity() {
                 pendingExperiments, discontinued, deprecatedPrompt, { deprecatedPrompt = false },
                 ::restartBrowser, experimentPreferences
             )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleExternalIntent(intent)
+    }
+
+    private fun resolveRealFilePath(uri: Uri): String? {
+        if (uri.scheme.equals("file", ignoreCase = true)) return uri.path?.takeIf { it.isNotBlank() }
+        if (android.provider.DocumentsContract.isDocumentUri(this, uri) &&
+            uri.authority == "com.android.externalstorage.documents"
+        ) {
+            val docId = android.provider.DocumentsContract.getDocumentId(uri)
+            val parts = docId.split(":", limit = 2)
+            if (parts.size == 2 && parts[0].equals("primary", ignoreCase = true)) {
+                return "/storage/emulated/0/${parts[1]}"
+            }
+        }
+        runCatching {
+            contentResolver.query(uri, arrayOf("_data"), null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex("_data")
+                if (idx >= 0 && cursor.moveToFirst()) {
+                    cursor.getString(idx)?.takeIf { it.startsWith("/") }?.let { return it }
+                }
+            }
+        }
+        val rawPath = uri.path.orEmpty()
+        val emuIdx = rawPath.indexOf("/storage/emulated/")
+        if (emuIdx >= 0) return rawPath.substring(emuIdx)
+        val sdIdx = rawPath.indexOf("/sdcard/")
+        if (sdIdx >= 0) return "/storage/emulated/0/" + rawPath.substring(sdIdx + "/sdcard/".length)
+        return null
+    }
+
+    private fun handleExternalIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val uriStr = uri.toString()
+        val mime = intent.type?.takeIf { it.isNotBlank() && it != "*/*" }
+            ?: runCatching { contentResolver.getType(uri) }.getOrNull()
+            ?: BrowserNetwork.mediaMime(uriStr, null)
+        val current = browser.current
+        val targetTab = if (current != null && (current.nativeHome || (current.url.isEmpty() && current.media == null))) {
+            current
+        } else {
+            browser.newTab().also { browser.select(it) }
+        }
+        val realPath = resolveRealFilePath(uri)
+        val displayFileUri = if (realPath != null) "file://$realPath" else uriStr
+        val isMedia = mime?.startsWith("video/", ignoreCase = true) == true ||
+            mime?.startsWith("audio/", ignoreCase = true) == true ||
+            BrowserNetwork.mediaMime(displayFileUri, mime) != null
+        if (isMedia) {
+            val playUri = if (realPath != null && java.io.File(realPath).canRead()) "file://$realPath" else uriStr
+            targetTab.openMedia(MediaTarget(displayFileUri, mime, playUrl = playUri))
+            return
+        }
+        if (uri.scheme.equals("http", ignoreCase = true) || uri.scheme.equals("https", ignoreCase = true)) {
+            targetTab.navigate(uriStr)
+            return
+        }
+        val bytes = runCatching { contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+        if (bytes != null) {
+            targetTab.openLocalHtml(bytes, displayFileUri)
+            if (realPath != null) {
+                browser.history.recordLocalFile(displayFileUri, realPath.substringAfterLast('/'), browser.incognito)
+            }
+        } else {
+            targetTab.openLocalUri(displayFileUri)
         }
     }
 
@@ -305,8 +392,10 @@ class MainActivity : ComponentActivity() {
         if (!isInPictureInPictureMode && !isChangingConfigurations) {
             nativePlayer?.pause()
             browser.current?.let { tab ->
-                tab.sendWebPipAction("pause", false)
-                tab.webMediaSession?.pause()
+                if (tab.pipSession == null && !tab.pendingClonedPip) {
+                    tab.sendWebPipAction("pause", false)
+                    tab.webMediaSession?.pause()
+                }
             }
         }
         super.onStop()
@@ -348,21 +437,55 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enterVideoPip(aspect: Rational): Boolean {
+        val current = browser.current
+        if (current?.media != null) return enterExoPip(current, aspect)
         if (Build.VERSION.SDK_INT < 26 || !supportsPip || isInPictureInPictureMode) return false
         pipAspect = aspect
-        browser.current?.updateWebPip(supportsPip, true)
+        current?.updateWebPip(supportsPip, true)
         return runCatching { enterPictureInPictureMode(currentPipParams()) }.getOrDefault(false)
     }
 
-    private fun enterCurrentVideoPip(): Boolean {
-        val tab = browser.current ?: return false
-        if (tab.media == null) return false
-        val aspect = nativePlayer?.takeIf { it.isPlaying }?.videoSize?.let { size ->
+    private fun enterExoPip(tab: BrowserSession, aspectOverride: Rational? = null, deferLaunch: Boolean = false): Boolean {
+        val mediaTarget = tab.media ?: return false
+        if (Build.VERSION.SDK_INT < 26 || !supportsPip || PipSessionHost.session != null || PipSessionHost.exoActive) return false
+        val exo = nativePlayer
+        val posMs = exo?.currentPosition?.coerceAtLeast(0L) ?: 0L
+        val playing = exo?.let { it.isPlaying || it.playWhenReady } ?: true
+        val aspect = aspectOverride ?: exo?.videoSize?.let { size ->
             if (size.width > 0 && size.height > 0) {
                 videoAspect((size.width * size.pixelWidthHeightRatio).toLong(), size.height.toLong())
             } else null
-        } ?: return false
-        return enterVideoPip(aspect)
+        } ?: Rational(16, 9)
+        exo?.pause()
+        PipSessionHost.aspect = aspect
+        PipSessionHost.onExoClosed = { closedPos, wasPlaying ->
+            nativePlayer?.let { p ->
+                val userResumedMain = p.playWhenReady || p.isPlaying
+                if (closedPos > 0L) p.seekTo(closedPos)
+                if (userResumedMain || wasPlaying) p.play() else p.pause()
+            }
+        }
+        val appCtx = applicationContext
+        val intent = Intent(appCtx, PipActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("url", resolveLocalPlaybackUri(appCtx, mediaTarget.playUrl))
+            putExtra("mime", mediaTarget.mime)
+            putExtra("positionMs", posMs)
+            putExtra("playing", playing)
+        }
+        if (deferLaunch) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                runCatching { appCtx.startActivity(intent) }
+            }, 50L)
+            return true
+        }
+        return runCatching { appCtx.startActivity(intent); true }.getOrDefault(false)
+    }
+
+    private fun enterCurrentVideoPip(deferLaunch: Boolean = false): Boolean {
+        val tab = browser.current ?: return false
+        if (tab.media == null) return false
+        return enterExoPip(tab, deferLaunch = deferLaunch)
     }
 
     @RequiresApi(26)
@@ -394,10 +517,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (!enterCurrentVideoPip() && Build.VERSION.SDK_INT >= 26 && supportsPip && !isInPictureInPictureMode) {
+        if (PipSessionHost.session != null || PipSessionHost.exoActive) return
+        if (!enterCurrentVideoPip(deferLaunch = true) && Build.VERSION.SDK_INT >= 26 && supportsPip && !isInPictureInPictureMode) {
             val current = browser.current
             if (current != null && !current.nativeHome && current.webPlaying) {
-                enterVideoPip(current.fullscreenAspect)
+                if (PlatformPip.isSupported) {
+                    current.requestClonedPip { enterVideoPip(current.fullscreenAspect) }
+                } else {
+                    enterVideoPip(current.fullscreenAspect)
+                }
             }
         }
     }
@@ -575,7 +703,34 @@ internal object BrowserRuntime {
     }
 }
 
-private data class MediaTarget(val url: String, val mime: String?, val referer: String? = null)
+private fun resolveLocalPlaybackUri(context: Context, uriStr: String): String {
+    if (!uriStr.startsWith("file://", ignoreCase = true)) return uriStr
+    val path = Uri.parse(uriStr).path ?: return uriStr
+    if (java.io.File(path).canRead()) return uriStr
+    runCatching {
+        val collection = android.provider.MediaStore.Files.getContentUri("external")
+        context.contentResolver.query(
+            collection,
+            arrayOf(android.provider.MediaStore.MediaColumns._ID),
+            "${android.provider.MediaStore.MediaColumns.DATA}=?",
+            arrayOf(path),
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val id = cursor.getLong(0)
+                return android.content.ContentUris.withAppendedId(collection, id).toString()
+            }
+        }
+    }
+    return uriStr
+}
+
+private data class MediaTarget(
+    val url: String,
+    val mime: String?,
+    val referer: String? = null,
+    val playUrl: String = url
+)
 
 private fun readEnabledCiphers(preferences: SharedPreferences): Set<TlsCipherSuite> =
     TlsCipherSuite.entries.filterTo(mutableSetOf()) {
@@ -922,6 +1077,14 @@ private class BrowserSession(
         private set
     var security by mutableStateOf<JSONObject?>(null)
         private set
+    private val originSecurity = mutableMapOf<String, JSONObject>()
+    fun securityFor(targetUrl: String): JSONObject? {
+        val direct = security?.takeIf { it.optString("url").sameOriginAs(targetUrl) }
+        if (direct != null) return direct
+        val uri = targetUrl.toHttpUriOrNull() ?: return null
+        val key = "${uri.scheme?.lowercase()}://${uri.host?.lowercase()}:${uri.port}"
+        return originSecurity[key]
+    }
     var mediaSecurity by mutableStateOf<JSONObject?>(null)
         private set
     private var pageCertificate by mutableStateOf<GeckoSession.ProgressDelegate.SecurityInformation?>(null)
@@ -956,6 +1119,12 @@ private class BrowserSession(
     }
 
     fun openMedia(target: MediaTarget, cert: java.security.cert.X509Certificate? = null) {
+        if (pipSession != null || pendingClonedPip) {
+            exitClonedPip()
+        }
+        sendWebPipAction("pause", false)
+        webMediaSession?.pause()
+        session.setActive(false)
         media = target
         mediaSecurity = null
         mediaCertificate = null
@@ -964,6 +1133,9 @@ private class BrowserSession(
         if (uri != null) {
             val mediaTitle = uri.lastPathSegment?.takeIf { it.isNotBlank() }.orEmpty()
             history.recordSite(target.url, mediaTitle, executor, incognito)
+        } else if (target.url.startsWith("file://", ignoreCase = true)) {
+            val mediaTitle = target.url.substringAfterLast('/').takeIf { it.isNotBlank() }.orEmpty()
+            history.recordLocalFile(target.url, mediaTitle, incognito)
         }
     }
     var failure by mutableStateOf<String?>(null)
@@ -997,6 +1169,7 @@ private class BrowserSession(
     private val pendingNavigationUrls = mutableListOf<String>()
     private var extensionReady = false
     private var pendingUrl: String? = null
+    private var pendingHtml: ByteArray? = null
     private var modeChangeUrl: String? = null
     private var modeTrace = 0
 
@@ -1024,11 +1197,35 @@ private class BrowserSession(
         private set
     var pipSession by mutableStateOf<GeckoSession?>(null)
         private set
+    var pendingClonedPip by mutableStateOf(false)
+        private set
 
     fun clearPipSession() {
+        pendingClonedPip = false
         val old = pipSession
         pipSession = null
+        if (old != null && PipSessionHost.session === old) {
+            PipSessionHost.session = null
+            PipSessionHost.closePip?.invoke()
+        }
         if (old != null && old.isOpen) old.close()
+    }
+
+    fun requestClonedPip(onFallback: () -> Unit = {}) {
+        pendingClonedPip = true
+        updateWebPip(supported = true, inPip = false, clonedPip = true)
+        PlatformPip.request(session) {
+            pendingClonedPip = false
+            updateWebPip(supported = true, inPip = false, clonedPip = false)
+            onFallback()
+        }
+    }
+
+    fun exitClonedPip() {
+        pendingClonedPip = false
+        PlatformPip.exit(session) {
+            clearPipSession()
+        }
     }
 
     init {
@@ -1359,6 +1556,10 @@ private class BrowserSession(
                             message.optString("navProtocol").isNotEmpty() || message.optString("ip").isNotEmpty()
                         ) {
                             security = message
+                            message.optString("url").toHttpUriOrNull()?.let { u ->
+                                val key = "${u.scheme?.lowercase()}://${u.host?.lowercase()}:${u.port}"
+                                originSecurity[key] = message
+                            }
                         }
                     }
                     return GeckoResult.fromValue<Any>(true)
@@ -1417,11 +1618,21 @@ private class BrowserSession(
         extensionReady = true
         val target = pendingUrl
         pendingUrl = null
-        if (target != null) session.loadUri(target)
+        val htmlBytes = pendingHtml
+        pendingHtml = null
+        when {
+            htmlBytes != null -> session.load(GeckoSession.Loader().data(htmlBytes, "text/html"))
+            target != null -> session.loadUri(target)
+        }
     }
 
-    fun updateWebPip(supported: Boolean, inPip: Boolean) {
-        videoPort?.postMessage(JSONObject().put("supported", supported).put("inPip", inPip))
+    fun updateWebPip(supported: Boolean, inPip: Boolean, clonedPip: Boolean = pipSession != null) {
+        videoPort?.postMessage(
+            JSONObject()
+                .put("supported", supported)
+                .put("inPip", inPip)
+                .put("clonedPip", clonedPip)
+        )
     }
 
     var webTimeSec: Double = 0.0
@@ -1506,6 +1717,7 @@ private class BrowserSession(
     fun onWebViewAttached(attachedSession: GeckoSession, view: GeckoView? = null) {
         if (view != null) attachedWebView = view
         if (session !== attachedSession) return
+        if (media == null) attachedSession.setActive(true)
         val target = modeChangeUrl ?: return
         modeChangeUrl = null
         modePageStarted = false
@@ -1517,6 +1729,22 @@ private class BrowserSession(
     fun navigate(address: String) {
         val value = address.trim()
         if (value.isEmpty()) return
+        if (value.startsWith("file://", ignoreCase = true) || value.startsWith("/")) {
+            val fileUrl = if (value.startsWith("/")) "file://$value" else value
+            val mime = BrowserNetwork.mediaMime(fileUrl, null)
+            if (mime != null) {
+                openMedia(MediaTarget(fileUrl, mime))
+                return
+            }
+            val path = Uri.parse(fileUrl).path
+            val bytes = if (path != null) runCatching { java.io.File(path).takeIf { it.canRead() }?.readBytes() }.getOrNull() else null
+            if (bytes != null) {
+                openLocalHtml(bytes, fileUrl)
+            } else {
+                openLocalUri(fileUrl)
+            }
+            return
+        }
         val isSearch = value.toHttpUriOrNull() == null &&
             !(value.none(Char::isWhitespace) && ("." in value || value.startsWith("[") || value.startsWith("localhost")) &&
                 "https://$value".toHttpUriOrNull() != null)
@@ -1542,6 +1770,51 @@ private class BrowserSession(
         media = null
         failure = null
         security = null
+        pendingHtml = null
+        url = target
+        if (extensionReady) session.loadUri(target) else pendingUrl = target
+    }
+
+    fun openLocalHtml(bytes: ByteArray, displayLabel: String) {
+        finishHomeLoading()
+        modeChangeUrl = null
+        modeHandler.removeCallbacksAndMessages(null)
+        mobilePageUrl = null
+        firstDesktopPage = null
+        pageCertificate = null
+        rejectedCertificate = null
+        nativeHome = false
+        media = null
+        failure = null
+        security = null
+        pendingUrl = null
+        url = displayLabel
+        val htmlText = bytes.toString(Charsets.UTF_8)
+        val styledBytes = if ("font-family" !in htmlText.lowercase()) {
+            ("<style>:where(html){font-family:\"Times New Roman\",Times,serif;}</style>\n" + htmlText).toByteArray(Charsets.UTF_8)
+        } else {
+            bytes
+        }
+        if (extensionReady) {
+            session.load(GeckoSession.Loader().data(styledBytes, "text/html"))
+        } else {
+            pendingHtml = styledBytes
+        }
+    }
+
+    fun openLocalUri(target: String) {
+        finishHomeLoading()
+        modeChangeUrl = null
+        modeHandler.removeCallbacksAndMessages(null)
+        mobilePageUrl = null
+        firstDesktopPage = null
+        pageCertificate = null
+        rejectedCertificate = null
+        nativeHome = false
+        media = null
+        failure = null
+        security = null
+        pendingHtml = null
         url = target
         if (extensionReady) session.loadUri(target) else pendingUrl = target
     }
@@ -1582,16 +1855,10 @@ private class BrowserSession(
         modeChangeUrl = null
         pageCertificate = null
         rejectedCertificate = null
+        clearPipSession()
         val previous = session
         session = createSession()
         configureSession()
-        PlatformPip.configure(session, runtime, onEnter = { cloned ->
-            clearPipSession()
-            pipSession = cloned
-        }, onExit = {
-            clearPipSession()
-        })
-        clearPipSession()
         PlatformPip.configure(session, runtime, onEnter = { cloned ->
             clearPipSession()
             pipSession = cloned
@@ -2029,6 +2296,13 @@ private fun BrowserContent(
     val keyboardController = LocalSoftwareKeyboardController.current
     val initialContentFocus = remember { FocusRequester() }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    var wasImeVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(imeVisible) {
+        if (wasImeVisible && !imeVisible && addressFocused) {
+            focus.clearFocus(force = true)
+        }
+        wasImeVisible = imeVisible
+    }
     LaunchedEffect(Unit) {
         focus.clearFocus(force = true)
         keyboardController?.hide()
@@ -2043,14 +2317,51 @@ private fun BrowserContent(
         PasswordManager.activeSuggestions = emptyList()
         if (screen != Screen.Browser) browser.captureThumbnail()
     }
-    LaunchedEffect(browser, browser.videoPort, supportsPip, inPip) {
-        browser.updateWebPip(supportsPip, inPip)
+    LaunchedEffect(browser, browser.videoPort, supportsPip, inPip, browser.pipSession, browser.pendingClonedPip) {
+        browser.updateWebPip(supportsPip, inPip, browser.pipSession != null || browser.pendingClonedPip)
     }
     LaunchedEffect(browser.webPipRequested) {
         if (browser.webPipRequested) {
             browser.webPipRequested = false
-            enterPip(browser.fullscreenAspect)
+            if (PlatformPip.isSupported) {
+                if (browser.pipSession != null) {
+                    browser.exitClonedPip()
+                } else {
+                    browser.requestClonedPip { enterPip(browser.fullscreenAspect) }
+                }
+            } else {
+                enterPip(browser.fullscreenAspect)
+            }
         }
+    }
+    val pipContext = LocalContext.current.applicationContext
+    val activeClonedPipTab = tabs.tabs.firstOrNull { it.pipSession != null }
+    val activeClonedPipSession = activeClonedPipTab?.pipSession
+    LaunchedEffect(activeClonedPipSession) {
+        val cloned = activeClonedPipSession ?: return@LaunchedEffect
+        val sourceTab = activeClonedPipTab ?: return@LaunchedEffect
+        if (PipSessionHost.session === cloned) return@LaunchedEffect
+        PipSessionHost.session = cloned
+        PipSessionHost.aspect = sourceTab.fullscreenAspect
+        PipSessionHost.playing = sourceTab.webPlaying
+        PipSessionHost.onAction = { playing ->
+            sourceTab.sendWebPipAction(if (playing) "play" else "pause", playing)
+            if (playing) sourceTab.webMediaSession?.play() else sourceTab.webMediaSession?.pause()
+        }
+        PipSessionHost.onClosed = { pause ->
+            if (pause) {
+                sourceTab.sendWebPipAction("pause", false)
+                sourceTab.webMediaSession?.pause()
+            } else {
+                sourceTab.sendWebPipAction("play", true)
+                sourceTab.webMediaSession?.play()
+            }
+            sourceTab.exitClonedPip()
+        }
+        val intent = Intent(pipContext, PipActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { pipContext.startActivity(intent) }
     }
     var nativeFullscreen by remember(browser, media) { mutableStateOf(false) }
     val immersiveVideo = (nativeFullscreen || webFullscreen) && !inPip
@@ -2244,7 +2555,10 @@ private fun BrowserContent(
             Screen.Settings, Screen.Theme, Screen.HttpVersions, Screen.TlsCiphers, Screen.Cookies
         )
         Box(
-            Modifier.fillMaxSize().padding(padding).pointerInput(addressFocused, imeVisible) {
+            Modifier.fillMaxSize()
+                .padding(top = padding.calculateTopPadding())
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                .pointerInput(addressFocused, imeVisible) {
                 if (!addressFocused || imeVisible) return@pointerInput
                 awaitPointerEventScope {
                     while (true) {
@@ -2333,6 +2647,46 @@ private fun BrowserContent(
                     }
                 }
                 screen == Screen.Settings -> Column(Modifier.verticalScroll(rememberScrollState())) {
+                    val settingsContext = LocalContext.current
+                    val checkDefaultBrowser: () -> Boolean = {
+                        if (Build.VERSION.SDK_INT >= 29) {
+                            runCatching {
+                                val rm = settingsContext.getSystemService(android.app.role.RoleManager::class.java)
+                                rm != null && rm.isRoleHeld(android.app.role.RoleManager.ROLE_BROWSER)
+                            }.getOrDefault(false)
+                        } else {
+                            val resolve = settingsContext.packageManager.resolveActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")),
+                                PackageManager.MATCH_DEFAULT_ONLY
+                            )
+                            resolve?.activityInfo?.packageName == settingsContext.packageName
+                        }
+                    }
+                    var isDefaultBrowser by remember { mutableStateOf(checkDefaultBrowser()) }
+                    val defaultBrowserLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+                    ) {
+                        isDefaultBrowser = checkDefaultBrowser()
+                    }
+                    ListItem(
+                        headlineContent = { Text("Default browser") },
+                        supportingContent = {
+                            Text(if (isDefaultBrowser) "BrowserEngine is your default browser" else "Set BrowserEngine as default for links")
+                        },
+                        leadingContent = { Icon(Icons.Default.Public, null) },
+                        modifier = Modifier.clickable {
+                            if (Build.VERSION.SDK_INT >= 29) {
+                                val rm = settingsContext.getSystemService(android.app.role.RoleManager::class.java)
+                                if (rm != null && rm.isRoleAvailable(android.app.role.RoleManager.ROLE_BROWSER)) {
+                                    defaultBrowserLauncher.launch(rm.createRequestRoleIntent(android.app.role.RoleManager.ROLE_BROWSER))
+                                    return@clickable
+                                }
+                            }
+                            runCatching {
+                                defaultBrowserLauncher.launch(Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+                            }
+                        }
+                    )
                     ListItem(
                         headlineContent = { Text("Theme") }, supportingContent = { Text(if (tabs.dark) "Dark Theme" else "Light Theme") },
                         leadingContent = { Icon(Icons.Default.Palette, null) },
@@ -2373,6 +2727,7 @@ private fun BrowserContent(
                     val geckoVersion = remember {
                         GeckoSession.getDefaultUserAgent().substringAfter("rv:", "").substringBefore(")")
                             .ifBlank { BuildConfig.GECKOVIEW_MAJOR }
+                            .removeSuffix(".0")
                     }
                     ListItem(headlineContent = { Text("About BrowserEngine") },
                         supportingContent = { Text("Version ${BuildConfig.VERSION_NAME} · GeckoView $geckoVersion") })
@@ -2473,43 +2828,47 @@ private fun BrowserContent(
                         hostState = snackbarHostState,
                         modifier = Modifier.align(Alignment.TopCenter)
                     )
-                    val typed = address.text.toString().trim()
-                    if (addressFocused && typed.isNotEmpty() && typed != displayedUrl) {
-                        val matches = tabs.history.entries.filter {
-                            it.title.contains(typed, ignoreCase = true) || it.url.contains(typed, ignoreCase = true)
-                        }.take(6)
-                        if (matches.isNotEmpty()) {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
-                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                tonalElevation = 6.dp,
-                                shadowElevation = 6.dp
-                            ) {
-                                Column {
-                                    matches.forEach { item ->
-                                        val favicon = if (item.type == HistoryType.SITE) tabs.history.iconFor(item.host) else null
-                                        ListItem(
-                                            headlineContent = { Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                            supportingContent = { Text(item.url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                            leadingContent = {
-                                                when {
-                                                    item.type == HistoryType.SEARCH -> Icon(Icons.Default.Search, contentDescription = null)
-                                                    favicon != null -> Image(
-                                                        bitmap = favicon,
-                                                        contentDescription = null,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier = Modifier.size(24.dp).clip(MaterialTheme.shapes.extraSmall)
-                                                    )
-                                                    else -> Icon(Icons.Default.Public, contentDescription = null)
-                                                }
-                                            },
-                                            modifier = Modifier.clickable {
-                                                focus.clearFocus()
-                                                browser.navigate(item.url)
-                                            }
-                                        )
+                }
+            }
+            val typed = address.text.toString().trim()
+            if (addressFocused && screen == Screen.Browser && !inPip) {
+                val matches = if (typed.isEmpty() || typed == displayedUrl) {
+                    tabs.history.entries.take(6)
+                } else {
+                    tabs.history.entries.filter {
+                        it.title.contains(typed, ignoreCase = true) || it.url.contains(typed, ignoreCase = true)
+                    }.take(6)
+                }
+                if (matches.isNotEmpty()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).zIndex(10f),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        tonalElevation = 6.dp,
+                        shadowElevation = 6.dp
+                    ) {
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            matches.forEach { item ->
+                                val favicon = if (item.type == HistoryType.SITE) tabs.history.iconFor(item.host) else null
+                                ListItem(
+                                    headlineContent = { Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    supportingContent = { Text(item.url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    leadingContent = {
+                                        when {
+                                            item.type == HistoryType.SEARCH -> Icon(Icons.Default.Search, contentDescription = null)
+                                            favicon != null -> Image(
+                                                bitmap = favicon,
+                                                contentDescription = null,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.size(24.dp).clip(MaterialTheme.shapes.extraSmall)
+                                            )
+                                            else -> Icon(Icons.Default.Public, contentDescription = null)
+                                        }
+                                    },
+                                    modifier = Modifier.clickable {
+                                        focus.clearFocus()
+                                        browser.navigate(item.url)
                                     }
-                                }
+                                )
                             }
                         }
                     }
@@ -2957,8 +3316,12 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     reload: () -> Unit
 ) {
     val url = browser.displayUrl.toHttpUriOrNull()
-    val rawInfo = if (browser.media != null) browser.mediaSecurity ?: browser.security else browser.security
-    val info = rawInfo?.takeIf { it.optString("url").sameOriginAs(browser.displayUrl) }
+    val info = if (browser.media != null) {
+        browser.mediaSecurity?.takeIf { it.optString("url").sameOriginAs(browser.displayUrl) }
+            ?: browser.securityFor(browser.displayUrl)
+    } else {
+        browser.securityFor(browser.displayUrl)
+    }
     fun field(name: String) = info?.optString(name).orEmpty()
     fun show(value: String) = value.ifBlank { "Unavailable" }
     val httpDisplay = field("http").ifBlank {
@@ -3010,7 +3373,7 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                 })
             }
         )
-        if (ip.isEmpty() || cached) TextButton(onClick = reload) { Text("Reload to check") }
+        if (ip.isEmpty()) TextButton(onClick = reload) { Text("Reload to check") }
     }
 }
 
@@ -3037,12 +3400,19 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     val player = remember(target, desktop) {
         runCatching {
             val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-            val factory = DataSource.Factory {
-                GeckoMediaDataSource(executor, BrowserNetwork.agent(desktop), target.referer) { response ->
-                    val cert = response.certificate
-                    if (cert != null) {
-                        val uri = response.uri
-                        mainHandler.post { onMediaCertificate(uri, cert) }
+            val resolvedPlayUrl = resolveLocalPlaybackUri(context, target.playUrl)
+            val isLocal = resolvedPlayUrl.startsWith("content:", ignoreCase = true) ||
+                resolvedPlayUrl.startsWith("file:", ignoreCase = true)
+            val factory = if (isLocal) {
+                com.google.android.exoplayer2.upstream.DefaultDataSource.Factory(context)
+            } else {
+                DataSource.Factory {
+                    GeckoMediaDataSource(executor, BrowserNetwork.agent(desktop), target.referer) { response ->
+                        val cert = response.certificate
+                        if (cert != null) {
+                            val uri = response.uri
+                            mainHandler.post { onMediaCertificate(uri, cert) }
+                        }
                     }
                 }
             }
@@ -3075,7 +3445,7 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                             }
                         }
                     })
-                    setMediaItem(MediaItem.Builder().setUri(target.url).setMimeType(target.mime).build())
+                    setMediaItem(MediaItem.Builder().setUri(resolvedPlayUrl).setMimeType(target.mime).build())
                     prepare()
                     playWhenReady = true
                 }
@@ -3098,15 +3468,21 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
         }
     }
     Box(Modifier.fillMaxSize()) {
+        val exoInPip = PipSessionHost.exoActive
         AndroidView(
             factory = { viewContext ->
-                LayoutInflater.from(viewContext).inflate(R.layout.browser_video_player, null) as PlayerView
+                (LayoutInflater.from(viewContext).inflate(R.layout.browser_video_player, null) as PlayerView).apply {
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                }
             },
             modifier = Modifier.fillMaxSize(),
             onRelease = { it.player = null },
             update = { view ->
                 if (view.player !== player) view.player = player
-                view.useController = !inPip
+                view.visibility = if (exoInPip) View.GONE else View.VISIBLE
+                if (exoInPip) view.hideController()
+                view.useController = !inPip && !exoInPip
                 view.findViewById<ImageButton>(R.id.browser_exo_tracks).setOnClickListener { showTracks = true }
                 view.findViewById<ImageButton>(R.id.browser_exo_fullscreen).apply {
                     setImageResource(if (fullscreen) com.google.android.exoplayer2.ui.R.drawable.exo_ic_fullscreen_exit
@@ -3117,13 +3493,21 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                 }
                 view.findViewById<ImageButton>(R.id.browser_exo_pip).apply {
                     val shape = aspect
-                    visibility = if (supportsPip && !inPip) View.VISIBLE else View.GONE
+                    visibility = if (supportsPip && !inPip && !exoInPip) View.VISIBLE else View.GONE
                     setOnClickListener { enterPip(shape ?: android.util.Rational(16, 9)) }
                 }
             }
         )
-        if (!inPip && showTracks) VideoTracksDialog(player, tracks) { showTracks = false }
-        if (!inPip) failure?.let { Text("Playback error ($it)", Modifier.align(Alignment.TopCenter).padding(16.dp), color = Color.White) }
+        if (exoInPip) {
+            Box(
+                Modifier.fillMaxSize().background(Color.Black).clickable { PipSessionHost.closePip?.invoke() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Already Playing on PiP", color = Color.White, style = MaterialTheme.typography.titleMedium)
+            }
+        }
+        if (!inPip && !exoInPip && showTracks) VideoTracksDialog(player, tracks) { showTracks = false }
+        if (!inPip && !exoInPip) failure?.let { Text("Playback error ($it)", Modifier.align(Alignment.TopCenter).padding(16.dp), color = Color.White) }
     }
 }
 

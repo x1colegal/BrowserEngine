@@ -5,4 +5,5 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000"
+    app:surface_type="texture_view"
     app:controller_layout_id="@layout/browser_video_controls" />

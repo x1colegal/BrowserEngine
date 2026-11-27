@@ -16,6 +16,9 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import androidx.annotation.RequiresApi
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.MediaItem
@@ -28,8 +31,10 @@ internal object PipSessionHost {
     var session: GeckoSession? = null
     var aspect: Rational = Rational(16, 9)
     var playing: Boolean = true
+    var exoActive by mutableStateOf(false)
     var onAction: ((Boolean) -> Unit)? = null
     var onClosed: ((Boolean) -> Unit)? = null
+    var onExoClosed: ((Long, Boolean) -> Unit)? = null
     var closePip: (() -> Unit)? = null
 }
 
@@ -40,6 +45,9 @@ class PipActivity : Activity() {
     private var attachedSession: GeckoSession? = null
     private var mediaSession: MediaSession? = null
     private var enteredPip = false
+    private var hasEnteredPip = false
+    private var returnOnResume = false
+    private var isStoppedState = false
     private var sessionPlaying = true
     private var closedByUser = true
 
@@ -70,6 +78,8 @@ class PipActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
         val url = intent.getStringExtra("url")?.takeIf { it.isNotBlank() }
         val hostSession = if (url == null) PipSessionHost.session else null
 
@@ -79,15 +89,22 @@ class PipActivity : Activity() {
         }
 
         if (url != null) {
+            val mime = intent.getStringExtra("mime")?.takeIf { it.isNotBlank() }
             val positionMs = intent.getLongExtra("positionMs", 0L).coerceAtLeast(0L)
+            val initialPlaying = intent.getBooleanExtra("playing", true)
             val view = PlayerView(this).apply { useController = false }
             playerView = view
             setContentView(view)
 
             val exo = ExoPlayer.Builder(this).build().apply {
-                setMediaItem(MediaItem.fromUri(url))
+                setMediaItem(
+                    MediaItem.Builder()
+                        .setUri(url)
+                        .apply { if (mime != null) setMimeType(mime) }
+                        .build()
+                )
                 if (positionMs > 0L) seekTo(positionMs)
-                playWhenReady = true
+                playWhenReady = initialPlaying
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         updateParams()
@@ -97,19 +114,30 @@ class PipActivity : Activity() {
             }
             player = exo
             view.player = exo
+            PipSessionHost.exoActive = true
+            PipSessionHost.closePip = {
+                closedByUser = false
+                finishAndRemoveTask()
+            }
         } else if (hostSession != null) {
             attachedSession = hostSession
             sessionPlaying = PipSessionHost.playing
-            val gv = GeckoView(this)
+            val gv = GeckoView(this).apply {
+                layoutParams = android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
             geckoView = gv
             setContentView(gv)
+            if (!hostSession.isOpen) {
+                hostSession.open(BrowserRuntime.get(applicationContext))
+            }
             gv.setSession(hostSession)
-            hostSession.setActive(true)
-            hostSession.setFocused(true)
-            hostSession.setPriorityHint(GeckoSession.PRIORITY_HIGH)
+            hostSession.loadUri("about:blank")
             PipSessionHost.closePip = {
                 closedByUser = false
-                finish()
+                finishAndRemoveTask()
             }
         }
 
@@ -141,7 +169,41 @@ class PipActivity : Activity() {
                 IntentFilter("com.x1colegal.browserengine.PIP_ACTIVITY_CONTROL"),
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        isStoppedState = false
+    }
+
+    private fun bringMainToFront() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+        }
+        runCatching { startActivity(intent) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isStoppedState = false
+        if (returnOnResume) {
+            returnOnResume = false
+            closedByUser = false
+            bringMainToFront()
+            finishAndRemoveTask()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 26 && (attachedSession != null || player != null) && !hasEnteredPip) {
+            hasEnteredPip = true
             enteredPip = runCatching { enterPictureInPictureMode(buildParams()) }.getOrDefault(false)
+            if (!enteredPip) {
+                finishAndRemoveTask()
+            }
         }
     }
 
@@ -198,10 +260,21 @@ class PipActivity : Activity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration?) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         if (isInPictureInPictureMode) {
+            attachedSession?.setActive(true)
+            attachedSession?.setFocused(true)
             updateParams()
-        } else if (enteredPip) {
-            closedByUser = false
-            finish()
+        } else if (enteredPip && !isFinishing) {
+            if (!isStoppedState) {
+                returnOnResume = true
+            } else {
+                closedByUser = if (player != null) {
+                    !(player?.let { it.isPlaying || it.playWhenReady } ?: false)
+                } else {
+                    !sessionPlaying
+                }
+                bringMainToFront()
+                finishAndRemoveTask()
+            }
         }
     }
 
@@ -213,10 +286,11 @@ class PipActivity : Activity() {
     }
 
     override fun onStop() {
+        isStoppedState = true
         super.onStop()
-        if (Build.VERSION.SDK_INT >= 24 && !isInPictureInPictureMode && !isChangingConfigurations) {
+        if (Build.VERSION.SDK_INT >= 24 && !isInPictureInPictureMode && !isChangingConfigurations && !isFinishing && !returnOnResume) {
             closedByUser = true
-            finish()
+            finishAndRemoveTask()
         }
     }
 
@@ -225,17 +299,29 @@ class PipActivity : Activity() {
             runCatching { unregisterReceiver(pipReceiver) }
         }
         val onClosed = PipSessionHost.onClosed
+        val onExoClosed = PipSessionHost.onExoClosed
+        val wasHostingSession = attachedSession != null && PipSessionHost.session === attachedSession
         PipSessionHost.session = null
+        PipSessionHost.exoActive = false
         PipSessionHost.onAction = null
         PipSessionHost.onClosed = null
+        PipSessionHost.onExoClosed = null
         PipSessionHost.closePip = null
         attachedSession?.let { s ->
-            s.setPriorityHint(GeckoSession.PRIORITY_DEFAULT)
             geckoView?.releaseSession()
-            onClosed?.invoke(closedByUser)
+            if (wasHostingSession) {
+                onClosed?.invoke(closedByUser)
+            } else if (s.isOpen) {
+                s.close()
+            }
         }
         attachedSession = null
         geckoView = null
+        player?.let { exo ->
+            val pos = exo.currentPosition.coerceAtLeast(0L)
+            val wasPlaying = exo.isPlaying || exo.playWhenReady
+            onExoClosed?.invoke(pos, wasPlaying)
+        }
         playerView?.player = null
         player?.release()
         player = null

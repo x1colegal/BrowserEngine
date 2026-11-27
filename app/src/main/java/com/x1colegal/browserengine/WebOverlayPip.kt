@@ -53,6 +53,7 @@ internal object WebOverlayPip {
         session: GeckoSession,
         initialPlaying: Boolean,
         aspect: Rational,
+        isCloned: Boolean = false,
         onAction: (Boolean) -> Unit,
         onReleaseFromHost: () -> Unit = {},
         onClosed: (Boolean) -> Unit
@@ -334,7 +335,7 @@ internal object WebOverlayPip {
         container = root
         geckoView = gv
 
-        onReleaseFromHost()
+        if (!isCloned) onReleaseFromHost()
         root.alpha = 0f
         wm.addView(root, params)
         root.animate().alpha(1f).setDuration(220L).start()
@@ -344,7 +345,7 @@ internal object WebOverlayPip {
                 if (container === root && activeSession === session) {
                     gv.setSession(session)
                     session.setActive(true)
-                    session.setFocused(true)
+                    session.setFocused(!isCloned)
                     session.setPriorityHint(GeckoSession.PRIORITY_HIGH)
                 }
             }

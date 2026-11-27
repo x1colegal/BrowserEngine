@@ -138,7 +138,8 @@ internal object GeckoNetworkChangeMonitor {
 
 internal object BrowserNetwork {
     fun agent(desktop: Boolean): String {
-        val mobileAgent = GeckoSession.getDefaultUserAgent()
+        val mobileAgent = Regex("""(rv:|Gecko/|Firefox/)(\d+)\.0\b""")
+            .replace(GeckoSession.getDefaultUserAgent(), "$1$2")
         val agent = if (desktop) {
             "Mozilla/5.0 (X11; Desktop; rv:${mobileAgent.substringAfter("; rv:")}"
         } else {
@@ -159,6 +160,12 @@ internal object BrowserNetwork {
             path.endsWith(".webm") -> "video/webm"
             path.endsWith(".mkv") -> "video/x-matroska"
             path.endsWith(".mp3") -> "audio/mpeg"
+            path.endsWith(".m4a") -> "audio/mp4"
+            path.endsWith(".aac") -> "audio/aac"
+            path.endsWith(".ogg") || path.endsWith(".oga") -> "audio/ogg"
+            path.endsWith(".opus") -> "audio/opus"
+            path.endsWith(".wav") -> "audio/wav"
+            path.endsWith(".flac") -> "audio/flac"
             else -> null
         }
     }

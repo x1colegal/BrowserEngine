@@ -10,8 +10,8 @@ android {
         applicationId = "com.x1colegal.browserengine"
         minSdk = 21
         targetSdk = 36
-        versionCode = 26
-        versionName = "2.7"
+        versionCode = 27
+        versionName = "2.8"
     }
     flavorDimensions += "engine"
     productFlavors {
@@ -25,7 +25,7 @@ android {
             dimension = "engine"
             minSdk = 26
             versionNameSuffix = "-modern"
-            buildConfigField("String", "GECKOVIEW_MAJOR", "\"161\"")
+            buildConfigField("String", "GECKOVIEW_MAJOR", "\"163\"")
         }
     }
     buildFeatures {
@@ -46,7 +46,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     "legacyImplementation"("org.mozilla.geckoview:geckoview:143.0.20251003115653")
-    "modernImplementation"("org.mozilla.geckoview:geckoview:+")
+    "modernImplementation"("org.mozilla.geckoview:geckoview-nightly:+")
     implementation("com.google.android.exoplayer:exoplayer-core:2.19.1")
     implementation("com.google.android.exoplayer:exoplayer-hls:2.19.1")
     implementation("com.google.android.exoplayer:exoplayer-dash:2.19.1")

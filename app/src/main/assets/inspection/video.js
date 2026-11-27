@@ -2,6 +2,7 @@
   let port;
   let supported = false;
   let inPip = false;
+  let clonedPip = false;
   let scheduled = false;
   let controlsVideo = null;
 
@@ -230,6 +231,28 @@
           return;
         }
         supported = message.supported;
+        const wasClonedPip = clonedPip;
+        clonedPip = Boolean(message.clonedPip);
+        document.documentElement?.classList.toggle("browserengine-cloned-pip", clonedPip);
+        if (!wasClonedPip && clonedPip && !pipUserPaused) {
+          const v = pipVideo || document.querySelector("video");
+          if (v && !v.ended) {
+            const ensurePlay = () => {
+              if (!clonedPip || pipUserPaused || v.ended || !v.paused) return;
+              const rawV = v.wrappedJSObject || v;
+              try { (rawV.play ? rawV.play() : v.play?.())?.catch?.(() => {}); } catch (_) {}
+            };
+            setTimeout(ensurePlay, 100);
+            setTimeout(ensurePlay, 300);
+          }
+        }
+        if (wasClonedPip && !clonedPip && !pipUserPaused) {
+          const v = pipVideo || document.querySelector("video");
+          if (v && !v.ended && v.paused) {
+            const rawV = v.wrappedJSObject || v;
+            try { (rawV.play ? rawV.play() : v.play?.())?.catch?.(() => {}); } catch (_) {}
+          }
+        }
         if (inPip !== message.inPip) presentPip(message.inPip);
         queueRefresh();
       });
@@ -274,6 +297,12 @@
         button = makePipButton(player);
         bar.insertBefore(button, bar.querySelector(".vjs-fullscreen-control"));
       }
+      if (button) {
+        button.setAttribute("aria-pressed", String(clonedPip));
+        button.title = clonedPip ? "Exit picture-in-picture" : "Picture-in-picture";
+        button.setAttribute("aria-label", button.title);
+        button.style.color = clonedPip ? "#8ab4f8" : "";
+      }
       if (!supported) button?.remove();
     }
   }
@@ -285,7 +314,10 @@
   }
 
   try {
-    const isPip = () => Boolean(document.documentElement?.classList.contains("browserengine-pip"));
+    const isPip = () => Boolean(
+      document.documentElement?.classList.contains("browserengine-pip") ||
+      document.documentElement?.classList.contains("browserengine-cloned-pip")
+    );
     const pageWin = window.wrappedJSObject;
     if (pageWin && typeof exportFunction === "function") {
       const docProto = pageWin.Document?.prototype;
@@ -361,10 +393,10 @@
 
   for (const evt of ["visibilitychange", "webkitvisibilitychange", "blur", "pagehide"]) {
     window.addEventListener(evt, event => {
-      if (inPip) event.stopImmediatePropagation();
+      if (isPip()) event.stopImmediatePropagation();
     }, true);
     document.addEventListener(evt, event => {
-      if (inPip) event.stopImmediatePropagation();
+      if (isPip()) event.stopImmediatePropagation();
     }, true);
   }
 
@@ -533,8 +565,13 @@
   }, true);
 
   document.addEventListener("canplay", event => {
-    if (bootPip && bootAutoPlay && !pipUserPaused && event.target instanceof HTMLVideoElement && event.target.paused && !event.target.ended) {
-      tryAutoPlay(event.target);
+    const v = event.target;
+    if (!(v instanceof HTMLVideoElement) || !v.paused || v.ended || pipUserPaused) return;
+    if (bootPip && bootAutoPlay) {
+      tryAutoPlay(v);
+    } else if (clonedPip) {
+      const rawV = v.wrappedJSObject || v;
+      try { (rawV.play ? rawV.play() : v.play?.())?.catch?.(() => {}); } catch (_) {}
     }
   }, true);
 

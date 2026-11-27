@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.8
+
+- Updated `modern` flavor to GeckoView 163 Nightly (`geckoview-nightly:+`) and implemented cloned-video Picture-in-Picture using `pictureInPictureToken()`, `setPictureInPictureDelegate()`, `onEnterPictureInPicture()`, `onExitPictureInPicture()`, `getSessionPictureInPicture().request()`, `exit()`, `setKeepActive(true)`, `setActive(true)`, and `setFocused()` inside `PipActivity`, keeping the original session visible and interactive while browsing simultaneously and preserving playback when leaving or returning to the app (including dismissing with X or expanding).
+- Migrated ExoPlayer PiP into `PipActivity` with `"Already Playing on PiP"` overlay and state/position sync so `MainActivity` remains in Recents, and paused background web playback when opening ExoPlayer.
+- Added Android `ACTION_VIEW` ("Open with") support for HTTP/HTTPS links, local HTML files, and local/web video & audio files (recording real `file://` paths in history and converting to `content://` via `MediaStore` when needed for ExoPlayer), plus a **Default browser** option in Settings (`RoleManager.ROLE_BROWSER`).
+- Fixed Connection Details showing "Reload to check" when cached connection info already has a remote IP, and preserved per-origin connection info across cached reloads/navigations.
+- Fixed the URL bar history dropdown not appearing over ExoPlayer, made it scrollable when constrained by the keyboard, added `WindowInsets.ime.union(WindowInsets.navigationBars)` resizing for web chats/inputs, restored `"Times New Roman", Times, serif` as the default zero-specificity font on plain HTML pages, and stripped `.0` from GeckoView version strings in Settings and the User-Agent.
+
 ## 2.7
 
 - Added automatic GeckoView network state invalidation (`network:link-status-changed`, connection pruning, and network cache clear) whenever the active network, DNS/LinkProperties, or VPN (e.g. DNS64/NAT64) changes, preventing stale IPv4 connections after connecting to a VPN.

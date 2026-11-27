@@ -1,3 +1,7 @@
+:where(html) {
+  font-family: "Times New Roman", Times, serif;
+}
+
 .video-js .browserengine-vjs-pip svg {
   display: block;
   fill: currentColor;

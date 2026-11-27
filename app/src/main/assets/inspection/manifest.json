@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "BrowserEngine Connection Inspector",
-  "version": "1.12",
+  "version": "1.15",
   "browser_specific_settings": {
     "gecko": {
       "id": "connection@browserengine.local"
@@ -24,7 +24,8 @@
     {
       "matches": [
         "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "file://*/*"
       ],
       "run_at": "document_start",
       "js": [

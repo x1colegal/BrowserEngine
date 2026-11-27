@@ -6,5 +6,6 @@ prefs:
   dom.security.https_first_schemeless: false
   network.dns.upgrade_with_https_rr: false
   media.suspend-bkgnd-video.enabled: false
+  media.videocontrols.picture-in-picture.enabled: true
   dom.min_background_timeout_value: 4
   dom.timeout.enable_budget_timer_throttling: false
