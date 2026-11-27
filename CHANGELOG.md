@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.9
+
+- Fixed keyboard `Scaffold` `contentWindowInsets` (`WindowInsets.statusBars`) paired with `WindowInsets.ime.union(WindowInsets.navigationBars)` so opening the IME no longer leaves a black navigation bar gap or partially covers page content.
+- Added automatic `scrollIntoView` (`keepFocusedVisible`) on `focusin`, `resize`, and `visualViewport.resize` in the page script so focused inputs/textareas/textboxes scroll cleanly above the keyboard without manual swiping.
+
 ## 2.8
 
 - Updated `modern` flavor to GeckoView 163 Nightly (`geckoview-nightly:+`) and implemented cloned-video Picture-in-Picture using `pictureInPictureToken()`, `setPictureInPictureDelegate()`, `onEnterPictureInPicture()`, `onExitPictureInPicture()`, `getSessionPictureInPicture().request()`, `exit()`, `setKeepActive(true)`, `setActive(true)`, and `setFocused()` inside `PipActivity`, keeping the original session visible and interactive while browsing simultaneously and preserving playback when leaving or returning to the app (including dismissing with X or expanding).

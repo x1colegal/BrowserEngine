@@ -2438,6 +2438,7 @@ private fun BrowserContent(
 
     Box(Modifier.fillMaxSize()) {
     Scaffold(
+        contentWindowInsets = WindowInsets.statusBars,
         topBar = {
         when {
             inPip || webFullscreen || nativeFullscreen -> Unit
@@ -2556,7 +2557,7 @@ private fun BrowserContent(
         )
         Box(
             Modifier.fillMaxSize()
-                .padding(top = padding.calculateTopPadding())
+                .padding(padding)
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                 .pointerInput(addressFocused, imeVisible) {
                 if (!addressFocused || imeVisible) return@pointerInput
