@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.7
+
+- Added automatic GeckoView network state invalidation (`network:link-status-changed`, connection pruning, and network cache clear) whenever the active network, DNS/LinkProperties, or VPN (e.g. DNS64/NAT64) changes, preventing stale IPv4 connections after connecting to a VPN.
+
 ## 2.6
 
 - Updated API `Accept` header to `application/json; charset=windows-1252` across JSON requests.

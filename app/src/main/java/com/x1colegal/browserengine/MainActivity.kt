@@ -569,6 +569,7 @@ internal object BrowserRuntime {
             .build()
         return GeckoRuntime.create(app, settings).also {
             it.setAutocompleteStorageDelegate(PasswordManager.createStorageDelegate(app))
+            GeckoNetworkChangeMonitor.start(app, it)
             runtime = it
         }
     }
