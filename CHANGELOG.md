@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.10
+
+- Fixed downloads failing on Android 10+ (`MediaStore.Downloads`) when a file with the same name already exists in `Download/`, automatically appending ` (1)`, ` (2)`, etc.
+- Enabled `DefaultRenderersFactory.setEnableDecoderFallback(true)` in ExoPlayer (main player and `PipActivity`) so playback automatically falls back from hardware to software decoding if the device hardware codec fails.
+- Patched GeckoView's `Codec.setupAdaptivePlayback` via build-time bytecode instrumentation to use the video's actual `MediaFormat` `width`/`height` for `KEY_MAX_WIDTH`/`KEY_MAX_HEIGHT` instead of hardcoding `1920x1080`, and increased `GeckoProcessManager.getSurfaceAllocator` timeout from `100ms` to `5000ms` to prevent `TimeoutException` / `NS_ERROR_DOM_MEDIA_FATAL_ERR (0x806e0005)` when acquiring `GeckoSurface` on slower devices.
+- Fixed `GeckoResult.dispatchLocked` `AssertionError: Shouldn't have listeners with null dispatcher` (`SIGSEGV` in `libxul.so` when scrolling Home) by routing `GeckoWebExecutor.fetch` creation through the Main Looper in `BrowserNetwork.fetchBlocking`.
+- Fixed `ReferenceError: isPip is not defined` in `video.js` visibility/blur/pagehide listeners and throttled `video.js` `pip_time` / `MutationObserver` refreshes to reduce main-thread IPC overhead during video playback.
+
 ## 2.9
 
 - Fixed keyboard `Scaffold` `contentWindowInsets` (`WindowInsets.statusBars`) paired with `WindowInsets.ime.union(WindowInsets.navigationBars)` so opening the IME no longer leaves a black navigation bar gap or partially covers page content.

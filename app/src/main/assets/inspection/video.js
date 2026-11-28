@@ -307,17 +307,22 @@
     }
   }
 
+  let refreshTimer = 0;
   function queueRefresh() {
-    if (scheduled) return;
+    if (scheduled || refreshTimer) return;
     scheduled = true;
-    requestAnimationFrame(refresh);
+    refreshTimer = setTimeout(() => {
+      refreshTimer = 0;
+      requestAnimationFrame(refresh);
+    }, 250);
   }
 
+  const isPip = () => Boolean(
+    document.documentElement?.classList.contains("browserengine-pip") ||
+    document.documentElement?.classList.contains("browserengine-cloned-pip")
+  );
+
   try {
-    const isPip = () => Boolean(
-      document.documentElement?.classList.contains("browserengine-pip") ||
-      document.documentElement?.classList.contains("browserengine-cloned-pip")
-    );
     const pageWin = window.wrappedJSObject;
     if (pageWin && typeof exportFunction === "function") {
       const docProto = pageWin.Document?.prototype;
@@ -554,7 +559,8 @@
     if (bootPip && !bootApplied && !isAdPlaying()) applyBootToVideo(v);
     if (isAdPlaying()) return;
     const now = Date.now();
-    if (now - lastTimeSentMs >= 300) {
+    const intervalMs = isPip() ? 300 : 2000;
+    if (now - lastTimeSentMs >= intervalMs) {
       lastTimeSentMs = now;
       send({action: "pip_time", currentTime: v.currentTime || 0});
     }

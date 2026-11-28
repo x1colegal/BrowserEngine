@@ -60,12 +60,9 @@ private fun apiRequest(
                 .header("Content-Type", "application/json; charset=windows-1252")
                 .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
         }
-        val pending = executor.fetch(request.build(), GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS)
         val response = try {
-            pending.poll(15_000) ?: throw IOException("No BrowserEngine API response")
+            BrowserNetwork.fetchBlocking(executor, request.build(), GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS, 15_000L)
         } catch (error: TimeoutException) {
-            pending.withHandler(Handler(Looper.getMainLooper()))
-                .accept({ it?.body?.let { input -> runCatching { input.close() } } }, {})
             throw IOException("BrowserEngine API timed out", error)
         }
         val input = response.body
@@ -128,14 +125,7 @@ internal object HomeImageLoader {
                 sessionClient.fetchServerImageResponse(url)
             } else {
                 val request = WebRequest.Builder(url).header("User-Agent", BrowserNetwork.agent(false)).build()
-                val pending = executor.fetch(request)
-                try {
-                    pending.poll(10_000)
-                } catch (_: TimeoutException) {
-                    pending.withHandler(Handler(Looper.getMainLooper()))
-                        .accept({ it?.body?.let { s -> runCatching { s.close() } } }, {})
-                    null
-                }
+                runCatching { BrowserNetwork.fetchBlocking(executor, request, timeoutMs = 10_000L) }.getOrNull()
             }
             if (response == null || response.statusCode !in 200..299 || response.body == null) {
                 response?.body?.let { runCatching { it.close() } }
@@ -311,14 +301,9 @@ internal class HomeSessionClient(context: Context, private val executor: GeckoWe
                 .header("Content-Type", "application/json; charset=windows-1252")
                 .body(ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() })
                 .build()
-            val pending = executor.fetch(request, GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS)
-            return try {
-                pending.poll(10_000)
-            } catch (_: TimeoutException) {
-                pending.withHandler(Handler(Looper.getMainLooper()))
-                    .accept({ it?.body?.let { s -> runCatching { s.close() } } }, {})
-                null
-            }
+            return runCatching {
+                BrowserNetwork.fetchBlocking(executor, request, GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS, 10_000L)
+            }.getOrNull()
         }
         val first = postImage(getOrCreate()) ?: return null
         if (first.statusCode == 467 || first.statusCode == 401) {

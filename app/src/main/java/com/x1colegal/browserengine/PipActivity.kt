@@ -96,7 +96,9 @@ class PipActivity : Activity() {
             playerView = view
             setContentView(view)
 
-            val exo = ExoPlayer.Builder(this).build().apply {
+            val renderersFactory = com.google.android.exoplayer2.DefaultRenderersFactory(this)
+                .setEnableDecoderFallback(true)
+            val exo = ExoPlayer.Builder(this, renderersFactory).build().apply {
                 setMediaItem(
                     MediaItem.Builder()
                         .setUri(url)

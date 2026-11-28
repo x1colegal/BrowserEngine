@@ -16,9 +16,17 @@ import android.os.Looper
 import android.util.Log
 import org.mozilla.gecko.GeckoAppShell
 import org.mozilla.gecko.GeckoNetworkManager
+import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoWebExecutor
 import org.mozilla.geckoview.StorageController
+import org.mozilla.geckoview.WebRequest
+import org.mozilla.geckoview.WebResponse
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
 
 internal object GeckoNetworkChangeMonitor {
     private const val TAG = "BrowserNetMonitor"
@@ -137,6 +145,46 @@ internal object GeckoNetworkChangeMonitor {
 }
 
 internal object BrowserNetwork {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Fetches [request] via [executor] and blocks up to [timeoutMs].
+     * Always creates the underlying [GeckoResult] on a Looper thread so timeout
+     * cleanup listeners never attach to a null dispatcher.
+     */
+    fun fetchBlocking(
+        executor: GeckoWebExecutor,
+        request: WebRequest,
+        flags: Int = 0,
+        timeoutMs: Long = 10_000L
+    ): WebResponse {
+        val pending = if (Looper.myLooper() != null) {
+            executor.fetch(request, flags)
+        } else {
+            val resultRef = AtomicReference<GeckoResult<WebResponse>?>(null)
+            val errorRef = AtomicReference<Throwable?>(null)
+            val latch = CountDownLatch(1)
+            mainHandler.post {
+                try {
+                    resultRef.set(executor.fetch(request, flags))
+                } catch (t: Throwable) {
+                    errorRef.set(t)
+                } finally {
+                    latch.countDown()
+                }
+            }
+            latch.await()
+            errorRef.get()?.let { throw IOException("GeckoWebExecutor.fetch failed", it) }
+            resultRef.get() ?: throw IOException("No GeckoResult returned")
+        }
+        return try {
+            pending.poll(timeoutMs) ?: throw IOException("No response")
+        } catch (error: TimeoutException) {
+            pending.accept({ it?.body?.let { body -> runCatching { body.close() } } }, {})
+            throw error
+        }
+    }
+
     fun agent(desktop: Boolean): String {
         val mobileAgent = Regex("""(rv:|Gecko/|Firefox/)(\d+)\.0\b""")
             .replace(GeckoSession.getDefaultUserAgent(), "$1$2")

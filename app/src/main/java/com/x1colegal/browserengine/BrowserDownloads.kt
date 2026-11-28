@@ -194,28 +194,47 @@ internal class BrowserDownloads private constructor(private val app: Context) {
     ): WriteOutcome {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = app.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, entry.name)
-                put(MediaStore.Downloads.MIME_TYPE, entry.mime)
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                put(MediaStore.Downloads.IS_PENDING, 1)
+            val dot = entry.name.lastIndexOf('.')
+            val base = if (dot > 0) entry.name.substring(0, dot) else entry.name
+            val ext = if (dot > 0) entry.name.substring(dot) else ""
+            val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            var uri: Uri? = null
+            for (index in 0..99) {
+                val candidate = if (index == 0) entry.name else "$base ($index)$ext"
+                val existsInStore = runCatching {
+                    resolver.query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        arrayOf(MediaStore.MediaColumns._ID),
+                        "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                        arrayOf(candidate),
+                        null
+                    )?.use { it.moveToFirst() } == true
+                }.getOrDefault(false)
+                if (existsInStore || File(downloadsDir, candidate).exists()) continue
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, candidate)
+                    put(MediaStore.Downloads.MIME_TYPE, entry.mime)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                uri = runCatching { resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) }.getOrNull()
+                if (uri != null) break
             }
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: return WriteOutcome(false)
+            val targetUri = uri ?: return WriteOutcome(false)
             activeCancels[entry.id] = {
                 runCatching { body.close() }
-                runCatching { resolver.delete(uri, null, null) }
+                runCatching { resolver.delete(targetUri, null, null) }
             }
             return try {
                 val written = body.use { input ->
-                    val out = resolver.openOutputStream(uri) ?: throw IOException("Cannot open MediaStore stream")
+                    val out = resolver.openOutputStream(targetUri) ?: throw IOException("Cannot open MediaStore stream")
                     out.use { output -> copyWithProgress(input, output, totalBytes, onProgress) }
                 }
-                resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
-                val actualName = queryDisplayName(uri) ?: entry.name
-                WriteOutcome(true, contentUri = uri.toString(), finalName = actualName, bytesWritten = written)
+                resolver.update(targetUri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+                val actualName = queryDisplayName(targetUri) ?: entry.name
+                WriteOutcome(true, contentUri = targetUri.toString(), finalName = actualName, bytesWritten = written)
             } catch (_: Exception) {
-                runCatching { resolver.delete(uri, null, null) }
+                runCatching { resolver.delete(targetUri, null, null) }
                 WriteOutcome(false)
             }
         }
@@ -286,16 +305,7 @@ internal class BrowserDownloads private constructor(private val app: Context) {
             scope.launch {
                 val response = withContext(Dispatchers.IO) {
                     val request = WebRequest.Builder(url).header("User-Agent", BrowserNetwork.agent(desktop)).build()
-                    val pending = executor.fetch(request)
-                    try {
-                        pending.poll(20_000)
-                    } catch (_: TimeoutException) {
-                        pending.withHandler(Handler(Looper.getMainLooper()))
-                            .accept({ it?.body?.let { stream -> runCatching { stream.close() } } }, {})
-                        null
-                    } catch (_: Exception) {
-                        null
-                    }
+                    runCatching { BrowserNetwork.fetchBlocking(executor, request, timeoutMs = 20_000L) }.getOrNull()
                 }
                 if (response != null && response.statusCode in 200..299 && response.body != null) {
                     startReceive(response, response.body!!, incognito)

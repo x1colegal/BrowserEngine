@@ -152,17 +152,12 @@ internal class GeckoMediaDataSource(
         chunkRemaining = remaining
     }
 
-    private fun fetch(request: WebRequest): WebResponse {
-        val result = executor.fetch(request)
-        return try {
-            result.poll(25_000) ?: throw IOException("No media response")
-        } catch (error: TimeoutException) {
-            result.withHandler(android.os.Handler(android.os.Looper.getMainLooper()))
-                .accept({ it?.body?.let { body -> runCatching { body.close() } } }, {})
-            throw IOException("Media request timed out", error)
-        } catch (error: Exception) {
-            throw IOException("Gecko media request failed", error)
-        }
+    private fun fetch(request: WebRequest): WebResponse = try {
+        BrowserNetwork.fetchBlocking(executor, request, timeoutMs = 25_000L)
+    } catch (error: TimeoutException) {
+        throw IOException("Media request timed out", error)
+    } catch (error: Exception) {
+        throw IOException("Gecko media request failed", error)
     }
 
     private fun skipFully(input: InputStream, count: Long) {

@@ -145,14 +145,9 @@ internal class BrowserHistory private constructor(private val app: Context) {
             val bmp = withContext(Dispatchers.IO) {
                 runCatching {
                     val req = WebRequest.Builder(iconUrl).header("User-Agent", BrowserNetwork.agent(false)).build()
-                    val pending = executor.fetch(req, GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS)
-                    val res = try {
-                        pending.poll(8_000)
-                    } catch (_: TimeoutException) {
-                        pending.withHandler(Handler(Looper.getMainLooper()))
-                            .accept({ it?.body?.let { s -> runCatching { s.close() } } }, {})
-                        null
-                    }
+                    val res = runCatching {
+                        BrowserNetwork.fetchBlocking(executor, req, GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS, 8_000L)
+                    }.getOrNull()
                     if (res == null || res.statusCode !in 200..299 || res.body == null) {
                         res?.body?.let { runCatching { it.close() } }
                         return@runCatching null
