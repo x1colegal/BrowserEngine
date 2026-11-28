@@ -337,9 +337,6 @@ class MainActivity : ComponentActivity() {
         val bytes = runCatching { contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
         if (bytes != null) {
             targetTab.openLocalHtml(bytes, displayFileUri)
-            if (realPath != null) {
-                browser.history.recordLocalFile(displayFileUri, realPath.substringAfterLast('/'), browser.incognito)
-            }
         } else {
             targetTab.openLocalUri(displayFileUri)
         }
@@ -663,6 +660,7 @@ internal object BrowserRuntime {
     fun get(context: Context): GeckoRuntime {
         runtime?.let { return it }
         val app = context.applicationContext
+        PlaybackPreferences.load(app)
         val config = app.filesDir.resolve("geckoview.yaml")
         val preferences = AppPrefs.get(app, BROWSER_PREFERENCES)
         websiteCacheDisabled = preferences.getBoolean(WEBSITE_CACHE_DISABLED, true)
@@ -1133,9 +1131,6 @@ private class BrowserSession(
         if (uri != null) {
             val mediaTitle = uri.lastPathSegment?.takeIf { it.isNotBlank() }.orEmpty()
             history.recordSite(target.url, mediaTitle, executor, incognito)
-        } else if (target.url.startsWith("file://", ignoreCase = true)) {
-            val mediaTitle = target.url.substringAfterLast('/').takeIf { it.isNotBlank() }.orEmpty()
-            history.recordLocalFile(target.url, mediaTitle, incognito)
         }
     }
     var failure by mutableStateOf<String?>(null)
@@ -2511,42 +2506,84 @@ private fun BrowserContent(
                     else Icons.Default.MoreVert,
                     "Connection details"
                 ) { screen = Screen.Connection }
+                var lastOptionsDismissAtMs by remember { mutableStateOf(0L) }
+                val optionsTransition = remember { androidx.compose.animation.core.MutableTransitionState(false) }
+                optionsTransition.targetState = options
                 Box {
-                    NavigationIcon(Icons.Default.Settings, "Options") { options = true }
-                    DropdownMenu(
-                        expanded = options,
-                        onDismissRequest = { options = false },
-                        properties = androidx.compose.ui.window.PopupProperties(focusable = false)
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Settings") }, leadingIcon = { Icon(Icons.Default.Settings, null) },
-                            onClick = { options = false; screen = Screen.Settings }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Downloads") }, leadingIcon = { Icon(Icons.Default.Download, null) },
-                            onClick = { options = false; screen = Screen.Downloads }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("History") }, leadingIcon = { Icon(Icons.Default.History, null) },
-                            onClick = { options = false; screen = Screen.History }
-                        )
-                        if (ServerExperiment.INCOGNITO_MODE.key in activeExperiments) {
-                            DropdownMenuItem(
-                                text = { Text("Incognito") }, leadingIcon = { Icon(Icons.Default.VisibilityOff, null) },
-                                trailingIcon = { Checkbox(tabs.incognito, onCheckedChange = null) },
-                                onClick = { options = false; tabs.toggleIncognito() }
-                            )
+                    NavigationIcon(Icons.Default.Settings, "Options") {
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (options) {
+                            options = false
+                        } else if (now - lastOptionsDismissAtMs > 300L) {
+                            options = true
                         }
-                        DropdownMenuItem(
-                            text = { Text("Desktop site") }, leadingIcon = { Icon(Icons.Default.Computer, null) },
-                            trailingIcon = { Checkbox(browser.desktop, onCheckedChange = null) },
-                            onClick = { options = false; browser.setDesktopMode(!browser.desktop) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Back") }, enabled = media != null || browser.canGoBack,
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) },
-                            onClick = { options = false; back() }
-                        )
+                    }
+                    if (optionsTransition.currentState || optionsTransition.targetState) {
+                        val popupOffsetY = with(androidx.compose.ui.platform.LocalDensity.current) { 48.dp.roundToPx() }
+                        androidx.compose.ui.window.Popup(
+                            alignment = Alignment.TopEnd,
+                            offset = androidx.compose.ui.unit.IntOffset(0, popupOffsetY),
+                            onDismissRequest = {
+                                lastOptionsDismissAtMs = android.os.SystemClock.uptimeMillis()
+                                options = false
+                            },
+                            properties = androidx.compose.ui.window.PopupProperties(focusable = false)
+                        ) {
+                            androidx.compose.animation.AnimatedVisibility(
+                                visibleState = optionsTransition,
+                                enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(150)) +
+                                    androidx.compose.animation.scaleIn(
+                                        androidx.compose.animation.core.tween(150),
+                                        initialScale = 0.85f,
+                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f)
+                                    ),
+                                exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160)) +
+                                    androidx.compose.animation.scaleOut(
+                                        androidx.compose.animation.core.tween(160),
+                                        targetScale = 0.85f,
+                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f)
+                                    )
+                            ) {
+                                Surface(
+                                    shape = MaterialTheme.shapes.extraSmall,
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    tonalElevation = 3.dp,
+                                    shadowElevation = 3.dp
+                                ) {
+                                    Column(Modifier.width(IntrinsicSize.Max).padding(vertical = 8.dp)) {
+                                        DropdownMenuItem(
+                                            text = { Text("Settings") }, leadingIcon = { Icon(Icons.Default.Settings, null) },
+                                            onClick = { options = false; screen = Screen.Settings }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Downloads") }, leadingIcon = { Icon(Icons.Default.Download, null) },
+                                            onClick = { options = false; screen = Screen.Downloads }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("History") }, leadingIcon = { Icon(Icons.Default.History, null) },
+                                            onClick = { options = false; screen = Screen.History }
+                                        )
+                                        if (ServerExperiment.INCOGNITO_MODE.key in activeExperiments) {
+                                            DropdownMenuItem(
+                                                text = { Text("Incognito") }, leadingIcon = { Icon(Icons.Default.VisibilityOff, null) },
+                                                trailingIcon = { Checkbox(tabs.incognito, onCheckedChange = null) },
+                                                onClick = { options = false; tabs.toggleIncognito() }
+                                            )
+                                        }
+                                        DropdownMenuItem(
+                                            text = { Text("Desktop site") }, leadingIcon = { Icon(Icons.Default.Computer, null) },
+                                            trailingIcon = { Checkbox(browser.desktop, onCheckedChange = null) },
+                                            onClick = { options = false; browser.setDesktopMode(!browser.desktop) }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Back") }, enabled = media != null || browser.canGoBack,
+                                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) },
+                                            onClick = { options = false; back() }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2724,6 +2761,16 @@ private fun BrowserContent(
                         },
                         trailingContent = { Switch(tabs.websiteCacheDisabled, tabs::updateWebsiteCache) }
                     )
+                    var videoDecoderMode by remember { mutableStateOf(PlaybackPreferences.videoDecoderMode) }
+                    var audioDecoderMode by remember { mutableStateOf(PlaybackPreferences.audioDecoderMode) }
+                    DecoderChoiceSection("Video decoder", DecoderMode.entries, videoDecoderMode, { it.label }) {
+                        videoDecoderMode = it
+                        PlaybackPreferences.saveVideo(settingsContext, it)
+                    }
+                    DecoderChoiceSection("Audio decoder", DecoderMode.entries, audioDecoderMode, { it.label }) {
+                        audioDecoderMode = it
+                        PlaybackPreferences.saveAudio(settingsContext, it)
+                    }
                     ServerExperimentSettings(activeExperiments)
                     val geckoVersion = remember {
                         GeckoSession.getDefaultUserAgent().substringAfter("rv:", "").substringBefore(")")
@@ -3398,6 +3445,8 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
     var aspect by remember(target) { mutableStateOf<Rational?>(null) }
     var tracks by remember(target) { mutableStateOf(Tracks.EMPTY) }
     var showTracks by remember(target) { mutableStateOf(false) }
+    var lastTracksDismissAtMs by remember(target) { mutableStateOf(0L) }
+    val streamStats = remember(target) { ExoStreamStats() }
     val player = remember(target, desktop) {
         runCatching {
             val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -3422,19 +3471,22 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                 .setTargetBufferBytes(32 * 1024 * 1024)
                 .setPrioritizeTimeOverSizeThresholds(false)
                 .build()
-            val renderersFactory = com.google.android.exoplayer2.DefaultRenderersFactory(context)
-                .setEnableDecoderFallback(true)
+            val renderersFactory = PlaybackPreferences.createRenderersFactory(context, streamStats)
             ExoPlayer.Builder(context, renderersFactory)
                 .setLoadControl(loadControl)
                 .setSeekBackIncrementMs(10_000)
                 .setSeekForwardIncrementMs(10_000)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(factory))
                 .build().apply {
+                    streamStats.attach(this)
                     trackSelectionParameters = trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                         .build()
                     addListener(object : Player.Listener {
-                        override fun onTracksChanged(current: Tracks) { tracks = current }
+                        override fun onTracksChanged(current: Tracks) {
+                            tracks = current
+                            selectBestTracks(this@apply, current)
+                        }
                         override fun onPlayerError(error: PlaybackException) {
                             android.util.Log.e("BrowserEngine", "ExoPlayer playback failed", error)
                             failure = generateSequence(error as Throwable) { it.cause }
@@ -3486,7 +3538,14 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                 view.visibility = if (exoInPip) View.GONE else View.VISIBLE
                 if (exoInPip) view.hideController()
                 view.useController = !inPip && !exoInPip
-                view.findViewById<ImageButton>(R.id.browser_exo_tracks).setOnClickListener { showTracks = true }
+                view.findViewById<ImageButton>(R.id.browser_exo_tracks).setOnClickListener {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (showTracks) {
+                        showTracks = false
+                    } else if (now - lastTracksDismissAtMs > 300L) {
+                        showTracks = true
+                    }
+                }
                 view.findViewById<ImageButton>(R.id.browser_exo_fullscreen).apply {
                     setImageResource(if (fullscreen) com.google.android.exoplayer2.ui.R.drawable.exo_ic_fullscreen_exit
                         else com.google.android.exoplayer2.ui.R.drawable.exo_ic_fullscreen_enter)
@@ -3509,7 +3568,12 @@ private fun CertificateName(name: android.net.http.SslCertificate.DName) {
                 Text("Already Playing on PiP", color = Color.White, style = MaterialTheme.typography.titleMedium)
             }
         }
-        if (!inPip && !exoInPip && showTracks) VideoTracksDialog(player, tracks) { showTracks = false }
+        if (!inPip && !exoInPip && showTracks) {
+            VideoTracksDialog(player, tracks, streamStats) {
+                lastTracksDismissAtMs = android.os.SystemClock.uptimeMillis()
+                showTracks = false
+            }
+        }
         if (!inPip && !exoInPip) failure?.let { Text("Playback error ($it)", Modifier.align(Alignment.TopCenter).padding(16.dp), color = Color.White) }
     }
 }

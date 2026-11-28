@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.11
+
+- Added YouTube-style bitrate (measuring compressed video/audio sample bytes per second in `MediaCodecVideoRenderer`/`MediaCodecAudioRenderer` when track metadata omits bitrate), FPS, codec, sample rate, channel count, and resolution details to `VideoTracksDialog` across HLS, video, and audio tracks; removed the "Automatic" option to default to the highest quality track, prevented local `file://` items from being recorded in history, and fixed the top-bar gear menu toggle with animated close.
+- Added MaterialYT-style **Video decoder** and **Audio decoder** (`Auto` / `Force HW` / `Force SW`) settings backed by `DefaultRenderersFactory` `MediaCodecSelector` and decoder fallback.
+- Fixed `PipActivity` missing black letterbox background when entering Picture-in-Picture.
+
 ## 2.10
 
 - Fixed downloads failing on Android 10+ (`MediaStore.Downloads`) when a file with the same name already exists in `Download/`, automatically appending ` (1)`, ` (2)`, etc.

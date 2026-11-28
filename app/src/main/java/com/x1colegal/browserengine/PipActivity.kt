@@ -80,6 +80,7 @@ class PipActivity : Activity() {
         super.onCreate(savedInstanceState)
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.BLACK))
         val url = intent.getStringExtra("url")?.takeIf { it.isNotBlank() }
         val hostSession = if (url == null) PipSessionHost.session else null
 
@@ -92,12 +93,15 @@ class PipActivity : Activity() {
             val mime = intent.getStringExtra("mime")?.takeIf { it.isNotBlank() }
             val positionMs = intent.getLongExtra("positionMs", 0L).coerceAtLeast(0L)
             val initialPlaying = intent.getBooleanExtra("playing", true)
-            val view = PlayerView(this).apply { useController = false }
+            val view = PlayerView(this).apply {
+                useController = false
+                setBackgroundColor(android.graphics.Color.BLACK)
+            }
             playerView = view
             setContentView(view)
 
-            val renderersFactory = com.google.android.exoplayer2.DefaultRenderersFactory(this)
-                .setEnableDecoderFallback(true)
+            PlaybackPreferences.load(this)
+            val renderersFactory = PlaybackPreferences.createRenderersFactory(this)
             val exo = ExoPlayer.Builder(this, renderersFactory).build().apply {
                 setMediaItem(
                     MediaItem.Builder()
@@ -124,14 +128,18 @@ class PipActivity : Activity() {
         } else if (hostSession != null) {
             attachedSession = hostSession
             sessionPlaying = PipSessionHost.playing
+            val container = android.widget.FrameLayout(this).apply {
+                setBackgroundColor(android.graphics.Color.BLACK)
+            }
             val gv = GeckoView(this).apply {
-                layoutParams = android.view.ViewGroup.LayoutParams(
+                layoutParams = android.widget.FrameLayout.LayoutParams(
                     android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                     android.view.ViewGroup.LayoutParams.MATCH_PARENT
                 )
             }
+            container.addView(gv)
             geckoView = gv
-            setContentView(gv)
+            setContentView(container)
             if (!hostSession.isOpen) {
                 hostSession.open(BrowserRuntime.get(applicationContext))
             }
