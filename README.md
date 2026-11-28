@@ -24,6 +24,7 @@ BrowserEngine is an Android browser with a bundled GeckoView engine and a Jetpac
 ## Media
 
 - Play direct media, HLS and DASH with ExoPlayer through Gecko’s network stack. Select audio, video and subtitle tracks.
+- Configure **Video decoder** and **Audio decoder** (`Auto`, `Force HW`, `Force SW`) in Settings; these hardware/software decoder options apply only to ExoPlayer playback (not GeckoView web media).
 - Use fullscreen video and Android picture-in-picture for ExoPlayer playback on supported devices.
 
 ## Build
